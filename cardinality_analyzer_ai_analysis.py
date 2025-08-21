@@ -31,17 +31,21 @@ def get_ai_analysis(analyses: List[Dict], comparisons: Optional[List[Dict]],
         # Import OpenAI only when needed
         from openai import OpenAI
     except ImportError:
-        logger.error("OpenAI SDK not installed. Please install with: pip install -r requirements-cardinalityanalysis.txt")
+        logger.error("OpenAI SDK not installed. Please install with: pip install -r requirements.txt")
         return "Error: OpenAI SDK not available"
     
     # Check for API key
-    api_key = os.getenv('OPENAI_KEY')
+    api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
-        logger.error("OPENAI_KEY environment variable not set")
-        return "Error: OPENAI_KEY not configured"
+        logger.error("OpenAI API key not set. Please set OPENAI_API_KEY")
+        return "Error: OPENAI_API_KEY not configured"
     
-    # Get model from env or use default
-    model = os.getenv('OPENAI_MODEL', 'gpt-4.1')
+    # Get model from env or use default (GPT-5)
+    model = os.getenv('OPENAI_MODEL', 'gpt-5')
+    # Reasoning effort control (low | medium | high)
+    reasoning_effort = os.getenv('OPENAI_REASONING_EFFORT', 'medium').lower()
+    if reasoning_effort not in {'low', 'medium', 'high'}:
+        reasoning_effort = 'medium'
     
     # Initialize OpenAI client
     client = OpenAI(api_key=api_key)
@@ -50,72 +54,117 @@ def get_ai_analysis(analyses: List[Dict], comparisons: Optional[List[Dict]],
     data_summary = prepare_data_summary(analyses, comparisons, window, start_time)
     
     # System prompt explaining cardinality analysis
-    system_prompt = """You are an expert in Prometheus/Mimir metrics and cardinality analysis. Your role is to analyze metric cardinality data and explain what the data shows, focusing on describing the current state and any changes between time windows.
-
+    system_prompt = """You are an expert in Prometheus/Mimir metrics and cardinality analysis. Your task is to analyze metric cardinality data and explain the data clearly, focusing on describing the current state and any changes between time windows.
 Key concepts:
 - Cardinality: The number of unique time series for a metric (unique combinations of label values)
-- Labels: Key-value pairs that create dimensions for metrics (e.g., instance="server1", job="api")
-- High cardinality labels: Those with many unique values that consume more resources
-
-Your task is to:
+- Labels: Key-value pairs that create metric dimensions (e.g., instance="server1", job="api")
+- High cardinality labels: Labels with many unique values, consuming more resources
+Instructions:
 1. Describe the current cardinality state for each metric and label
-2. For comparisons: Explain exactly what changed between the two time windows
-3. Highlight which labels have the highest cardinality and their specific values
-4. Provide detailed breakdowns of the differences, not recommendations
-5. Focus on facts and observations, not solutions
-
-IMPORTANT: Do NOT provide recommendations, solutions, or next steps. The differences you observe are expected and intentional. Your role is purely to explain what the data shows in detail.
-
-Format your response with:
-- **Key Findings** (detailed bullet points of observations)
-- **Detailed Analysis** (comprehensive breakdown by metric and label)
+2. For comparisons: Explain what changed between the two time windows, with specific details
+3. Highlight which labels have the highest cardinality and list relevant values
+4. Provide detailed breakdowns of differences; do not give recommendations
+5. Stick to factual observations only - NO solutions or advice
+IMPORTANT: Do NOT provide recommendations, solutions, or next steps. Differences you observe are expected and intentional. Your role is to explain the data in detail.
+Format your response using:
+- **Key Findings**: Bullet points summarizing observations
+- **Detailed Analysis**: In-depth breakdown by metric and label
 - For comparisons: **Changes Between Windows** (specific differences with numbers)
-
-Use markdown formatting with **bold** for emphasis and proper bullet points."""
+Format with Markdown: use **bold** for emphasis and bullet points for clarity."""
     
     # User prompt with the actual data
-    user_prompt = f"""Please analyze this Prometheus/Mimir cardinality data and explain what it shows:
-
+    user_prompt = f"""Please analyze this Prometheus/Mimir cardinality data and describe what it shows:
 Analysis Window: {window} {f'(starting {start_time})' if start_time else '(recent)'}
 Analysis Type: {'Comparison between two time windows' if comparisons else 'Single time window analysis'}
-
 {data_summary}
-
-Please provide a detailed explanation of:
-1. The current cardinality levels for each metric and label
-2. Which labels have the highest number of unique values and what those values are
-3. For comparisons: Exactly what changed between the windows (with specific numbers and percentages)
-4. The distribution of cardinality across different labels
-5. Any patterns or notable observations in the data
-
-Remember: Focus only on describing and explaining the data. Do not provide recommendations or solutions."""
+Please explain:
+1. Current cardinality levels for each metric and label
+2. Which labels have the highest unique values and what those values are
+3. For comparisons: What changed between the windows (with numbers and percentages)
+4. Distribution of cardinality across labels
+5. Any significant patterns or observations
+Only describe and explain the data - do not give recommendations or solutions"""
     
     try:
-        # Make the API call
+        # Make the API call via Responses API
         logger.info(f"Sending analysis to OpenAI using model: {model}")
-        response = client.chat.completions.create(
+        response = client.responses.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+            input=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "input_text", "text": system_prompt}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_prompt}
+                    ]
+                }
             ],
-            temperature=0.3,  # Lower temperature for more consistent analysis
-            max_tokens=2000
+            temperature=0.3,
+            max_output_tokens=2000,
+            reasoning={"effort": reasoning_effort}
         )
-        
-        # Extract the response
-        ai_analysis = response.choices[0].message.content
-        
-        # Log token usage for monitoring
-        if hasattr(response, 'usage'):
-            logger.info(f"OpenAI token usage - Prompt: {response.usage.prompt_tokens}, "
-                       f"Completion: {response.usage.completion_tokens}, "
-                       f"Total: {response.usage.total_tokens}")
-        
-        return ai_analysis
-        
+
+        # Extract the response text (new SDKs provide output_text)
+        ai_analysis = None
+        try:
+            ai_analysis = getattr(response, 'output_text', None)
+        except Exception:
+            ai_analysis = None
+        if not ai_analysis:
+            try:
+                texts = []
+                output_items = getattr(response, 'output', []) or []
+                for item in output_items:
+                    item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                    if item_type == 'message':
+                        content_list = item.get('content') if isinstance(item, dict) else getattr(item, 'content', [])
+                        for content in content_list or []:
+                            ctype = content.get('type') if isinstance(content, dict) else getattr(content, 'type', None)
+                            if ctype in {'output_text', 'text'}:
+                                texts.append(content.get('text') if isinstance(content, dict) else getattr(content, 'text', ''))
+                ai_analysis = '\n'.join([t for t in texts if t]).strip()
+            except Exception:
+                ai_analysis = ''
+
+        # Log reasoning items (if present) at DEBUG
+        try:
+            output_items = getattr(response, 'output', []) or []
+            reasoning_chunks = []
+            for item in output_items:
+                item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                if item_type == 'message':
+                    content_list = item.get('content') if isinstance(item, dict) else getattr(item, 'content', [])
+                    for content in content_list or []:
+                        ctype = content.get('type') if isinstance(content, dict) else getattr(content, 'type', None)
+                        if ctype and 'reasoning' in str(ctype):
+                            reasoning_text = content.get('text') if isinstance(content, dict) else getattr(content, 'text', '')
+                            if reasoning_text:
+                                reasoning_chunks.append(reasoning_text)
+            if reasoning_chunks:
+                logger.debug("Reasoning content from model (truncated): %s", ("\n".join(reasoning_chunks))[:2000])
+        except Exception:
+            pass
+
+        # Log token usage for monitoring (Responses API fields)
+        try:
+            usage = getattr(response, 'usage', None)
+            if usage:
+                input_tokens = getattr(usage, 'input_tokens', None) or getattr(usage, 'prompt_tokens', None)
+                output_tokens = getattr(usage, 'output_tokens', None) or getattr(usage, 'completion_tokens', None)
+                reasoning_tokens = getattr(usage, 'reasoning_tokens', None)
+                logger.info("OpenAI usage - Input: %s, Output: %s, Reasoning: %s", input_tokens, output_tokens, reasoning_tokens)
+        except Exception:
+            pass
+
+        return ai_analysis or ""
+
     except Exception as e:
-        logger.error(f"Error calling OpenAI API: {e}")
+        logger.error(f"Error calling OpenAI Responses API: {e}")
         return f"Error generating AI analysis: {str(e)}"
 
 def prepare_data_summary(analyses: List[Dict], comparisons: Optional[List[Dict]], 
@@ -246,7 +295,7 @@ def generate_ai_report_section(ai_analysis: str) -> str:
     <div class="ai-analysis-section">
         <h2>AI Analysis</h2>
         <div class="ai-disclaimer">
-            <strong>Note:</strong> This analysis was generated by {os.getenv('OPENAI_MODEL', 'gpt-4.1')} 
+            <strong>Note:</strong> This analysis was generated by {os.getenv('OPENAI_MODEL', 'gpt-5')} 
             based on the cardinality data.
         </div>
         <div class="ai-content">

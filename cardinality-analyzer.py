@@ -282,7 +282,7 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
             from cardinality_analyzer_ai_analysis import generate_ai_report_section
             ai_section = generate_ai_report_section(ai_analysis)
         except ImportError:
-            ai_section = f'<div class="info-box" style="background: #ffebee; border-color: #f44336;">AI analysis was requested but module not available. Install with: pip install -r requirements-cardinalityanalysis.txt</div>'
+            ai_section = f'<div class="info-box" style="background: #ffebee; border-color: #f44336;">AI analysis was requested but module not available. Install with: pip install -r requirements.txt</div>'
     
     # Use string replacement instead of format to avoid conflicts with JavaScript template literals
     html_template = """<!DOCTYPE html>
@@ -772,25 +772,57 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     
     return html_output
 
-def generate_csv_output(analyses: List[Dict], filename: str = "cardinality_analysis.csv"):
-    """Generate CSV output"""
+def generate_csv_output(analyses: List[Dict], comparisons: Optional[List[Dict]] = None, 
+                        filename: str = "cardinality_analysis.csv"):
+    """Generate CSV output with optional comparison data"""
     with open(filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['Metric', 'Label', 'Cardinality', 'Top Values'])
         
-        for analysis in analyses:
-            metric_name = analysis['metric']
-            data = analysis['data']
-            
-            for label, info in data.items():
-                if label == '__total__':
-                    continue
-                    
-                cardinality = info.get('total_cardinality', 0)
-                top_values = info.get('top_values', [])
-                top_values_str = '; '.join([f"{val}:{count}" for val, count in top_values[:5]])
+        # Determine headers based on whether we have comparison data
+        if comparisons:
+            writer.writerow(['Metric', 'Label', 'Cardinality_Before', 'Cardinality_After', 
+                           'Change', 'Change_Percent', 'Top_Values_After'])
+        else:
+            writer.writerow(['Metric', 'Label', 'Cardinality', 'Top Values'])
+        
+        if comparisons:
+            # Output comparison data
+            for comp in comparisons:
+                metric_name = comp['metric']
                 
-                writer.writerow([metric_name, label, cardinality, top_values_str])
+                # Get the corresponding analysis data for top values
+                analysis_data = next((a['data'] for a in analyses if a['metric'] == metric_name), {})
+                
+                for label, change in comp['changes'].items():
+                    # Get top values from the analysis (after) data
+                    label_info = analysis_data.get(label, {})
+                    top_values = label_info.get('top_values', [])
+                    top_values_str = '; '.join([f"{val}:{count}" for val, count in top_values[:5]])
+                    
+                    writer.writerow([
+                        metric_name,
+                        label,
+                        change['before'],
+                        change['after'],
+                        change['change'],
+                        f"{change['change_pct']:.1f}",
+                        top_values_str
+                    ])
+        else:
+            # Output regular analysis data
+            for analysis in analyses:
+                metric_name = analysis['metric']
+                data = analysis['data']
+                
+                for label, info in data.items():
+                    if label == '__total__':
+                        continue
+                        
+                    cardinality = info.get('total_cardinality', 0)
+                    top_values = info.get('top_values', [])
+                    top_values_str = '; '.join([f"{val}:{count}" for val, count in top_values[:5]])
+                    
+                    writer.writerow([metric_name, label, cardinality, top_values_str])
     
     return filename
 
@@ -879,7 +911,7 @@ def main():
     
     # AI analysis option
     parser.add_argument('--ai-analysis', action='store_true',
-                       help='Generate AI-powered analysis and recommendations using OpenAI (requires OPENAI_KEY env var)')
+                       help='Generate AI-powered analysis using OpenAI Responses API (requires OPENAI_API_KEY env var)')
     
     args = parser.parse_args()
     
@@ -1004,7 +1036,7 @@ def main():
                 print(ai_analysis_text)
         
         if args.output in ['csv', 'all']:
-            csv_file = generate_csv_output(analyses)
+            csv_file = generate_csv_output(analyses, comparisons)
             logger.info(f"CSV output written to: {csv_file}")
         
         if args.output in ['html', 'all']:
