@@ -43,7 +43,7 @@ def get_ai_analysis(analyses: List[Dict], comparisons: Optional[List[Dict]],
     # Get model from env or use default (gpt-5-mini)
     model = os.getenv('OPENAI_MODEL', 'gpt-5-mini')
     # Reasoning effort control (low | medium | high)
-    reasoning_effort = os.getenv('OPENAI_REASONING_EFFORT', 'high').lower()
+    reasoning_effort = os.getenv('OPENAI_REASONING_EFFORT', 'medium').lower()
     if reasoning_effort not in {'low', 'medium', 'high'}:
         reasoning_effort = 'medium'
     

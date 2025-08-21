@@ -491,7 +491,7 @@ The cardinality analyzer now includes optional AI-powered analysis using OpenAI'
    OPENAI_API_KEY="sk-..."  # Your OpenAI API key
    # Optional overrides:
    OPENAI_MODEL="gpt-5-mini"     # Defaults to gpt-5-mini
-   OPENAI_REASONING_EFFORT="high"  # low|medium|high
+   OPENAI_REASONING_EFFORT="medium"  # low|medium|high
    ```
 
 3. **Enable AI analysis**:
