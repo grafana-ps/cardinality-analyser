@@ -1,0 +1,52 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist
+build
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Output files
+*.html
+*.csv
+cardinality_analysis.html
+cardinality_analysis.csv
+
+# Documentation
+README.md
+LICENSE
+
+# Test files
+test_*.py
+*_test.py
+
+# Docker files (not needed in context)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.yaml
