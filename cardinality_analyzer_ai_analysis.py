@@ -40,10 +40,10 @@ def get_ai_analysis(analyses: List[Dict], comparisons: Optional[List[Dict]],
         logger.error("OpenAI API key not set. Please set OPENAI_API_KEY")
         return "Error: OPENAI_API_KEY not configured"
     
-    # Get model from env or use default (GPT-5)
-    model = os.getenv('OPENAI_MODEL', 'gpt-5')
+    # Get model from env or use default (gpt-5-mini)
+    model = os.getenv('OPENAI_MODEL', 'gpt-5-mini')
     # Reasoning effort control (low | medium | high)
-    reasoning_effort = os.getenv('OPENAI_REASONING_EFFORT', 'medium').lower()
+    reasoning_effort = os.getenv('OPENAI_REASONING_EFFORT', 'high').lower()
     if reasoning_effort not in {'low', 'medium', 'high'}:
         reasoning_effort = 'medium'
     
@@ -86,8 +86,9 @@ Please explain:
 Only describe and explain the data - do not give recommendations or solutions"""
     
     try:
-        # Make the API call via Responses API
+        # Always use Responses API with gpt-5-mini
         logger.info(f"Sending analysis to OpenAI using model: {model}")
+        
         response = client.responses.create(
             model=model,
             input=[
@@ -104,32 +105,89 @@ Only describe and explain the data - do not give recommendations or solutions"""
                     ]
                 }
             ],
-            temperature=0.3,
-            max_output_tokens=2000,
+            max_output_tokens=65536,  # Maximum for gpt-5-mini (low cost model)
             reasoning={"effort": reasoning_effort}
         )
 
-        # Extract the response text (new SDKs provide output_text)
+        # Extract the response text - try multiple approaches for different SDK versions
         ai_analysis = None
+        
+        # Method 1: output_text attribute (Responses API - simplest when it works)
         try:
             ai_analysis = getattr(response, 'output_text', None)
-        except Exception:
-            ai_analysis = None
+            if ai_analysis:
+                logger.debug(f"Extracted AI analysis using 'output_text' attribute: {len(ai_analysis)} chars")
+            else:
+                logger.debug("output_text attribute is empty or None")
+        except Exception as e:
+            logger.debug(f"Failed to get output_text: {e}")
+        
+        # Method 2: Direct content attribute (for some SDK versions)
+        if not ai_analysis:
+            try:
+                ai_analysis = getattr(response, 'content', None)
+                if ai_analysis:
+                    logger.debug("Extracted AI analysis using 'content' attribute")
+            except Exception:
+                pass
+        
+        # Method 3: choices[0].message.content (standard chat completions)
+        if not ai_analysis:
+            try:
+                choices = getattr(response, 'choices', [])
+                if choices and len(choices) > 0:
+                    message = getattr(choices[0], 'message', None)
+                    if message:
+                        ai_analysis = getattr(message, 'content', None)
+                        if ai_analysis:
+                            logger.debug("Extracted AI analysis using 'choices[0].message.content'")
+            except Exception:
+                pass
+        
+        # Method 4: Parse output array structure (for Responses API)
         if not ai_analysis:
             try:
                 texts = []
                 output_items = getattr(response, 'output', []) or []
                 for item in output_items:
-                    item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                    # Get item type
+                    item_type = getattr(item, 'type', None)
+                    
+                    # Look for message items
                     if item_type == 'message':
-                        content_list = item.get('content') if isinstance(item, dict) else getattr(item, 'content', [])
-                        for content in content_list or []:
-                            ctype = content.get('type') if isinstance(content, dict) else getattr(content, 'type', None)
-                            if ctype in {'output_text', 'text'}:
-                                texts.append(content.get('text') if isinstance(content, dict) else getattr(content, 'text', ''))
-                ai_analysis = '\n'.join([t for t in texts if t]).strip()
-            except Exception:
-                ai_analysis = ''
+                        # Get content from the message
+                        content_list = getattr(item, 'content', [])
+                        if content_list:
+                            for content in content_list:
+                                # Check content type
+                                content_type = getattr(content, 'type', None)
+                                if content_type in {'output_text', 'text'}:
+                                    # Extract the text
+                                    text = getattr(content, 'text', '')
+                                    if text:
+                                        texts.append(text)
+                
+                ai_analysis = '\n'.join(texts).strip()
+                if ai_analysis:
+                    logger.debug("Extracted AI analysis using 'output' array structure")
+            except Exception as e:
+                logger.debug(f"Failed to parse output array: {e}")
+        
+        if not ai_analysis:
+            logger.warning("Could not extract AI analysis from response - all methods failed")
+            logger.debug(f"Response type: {type(response)}")
+            logger.debug(f"Response attributes: {dir(response)}")
+            # Debug output structure
+            try:
+                logger.debug(f"Output items count: {len(response.output)}")
+                for i, item in enumerate(response.output):
+                    logger.debug(f"Output[{i}]: type={getattr(item, 'type', 'unknown')}")
+                    if hasattr(item, 'content') and item.content:
+                        logger.debug(f"  Content items: {len(item.content)}")
+                        for j, c in enumerate(item.content[:2]):  # Log first 2 content items
+                            logger.debug(f"    [{j}] type={getattr(c, 'type', 'unknown')}, text_len={len(getattr(c, 'text', ''))}")
+            except Exception as e:
+                logger.debug(f"Failed to debug output structure: {e}")
 
         # Log reasoning items (if present) at DEBUG
         try:
@@ -156,8 +214,23 @@ Only describe and explain the data - do not give recommendations or solutions"""
             if usage:
                 input_tokens = getattr(usage, 'input_tokens', None) or getattr(usage, 'prompt_tokens', None)
                 output_tokens = getattr(usage, 'output_tokens', None) or getattr(usage, 'completion_tokens', None)
+
+                # Try multiple locations for reasoning token counts
                 reasoning_tokens = getattr(usage, 'reasoning_tokens', None)
-                logger.info("OpenAI usage - Input: %s, Output: %s, Reasoning: %s", input_tokens, output_tokens, reasoning_tokens)
+                if reasoning_tokens is None:
+                    output_token_details = getattr(usage, 'output_token_details', None)
+                    if output_token_details is not None:
+                        # Handle object or dict shape
+                        try:
+                            reasoning_tokens = getattr(output_token_details, 'reasoning_tokens', None)
+                        except Exception:
+                            reasoning_tokens = None
+                        if reasoning_tokens is None and isinstance(output_token_details, dict):
+                            reasoning_tokens = output_token_details.get('reasoning_tokens')
+
+                # Friendly fallback label
+                reasoning_display = reasoning_tokens if reasoning_tokens is not None else 'n/a'
+                logger.info("OpenAI usage - Input: %s, Output: %s, Reasoning: %s", input_tokens, output_tokens, reasoning_display)
         except Exception:
             pass
 
@@ -295,7 +368,7 @@ def generate_ai_report_section(ai_analysis: str) -> str:
     <div class="ai-analysis-section">
         <h2>AI Analysis</h2>
         <div class="ai-disclaimer">
-            <strong>Note:</strong> This analysis was generated by {os.getenv('OPENAI_MODEL', 'gpt-5')} 
+            <strong>Note:</strong> This analysis was generated by {os.getenv('OPENAI_MODEL', 'gpt-5-mini')} 
             based on the cardinality data.
         </div>
         <div class="ai-content">

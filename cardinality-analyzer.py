@@ -281,8 +281,19 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
         try:
             from cardinality_analyzer_ai_analysis import generate_ai_report_section
             ai_section = generate_ai_report_section(ai_analysis)
-        except ImportError:
+        except ImportError as e:
+            logger.error(f"Failed to import AI report section generator: {e}")
             ai_section = f'<div class="info-box" style="background: #ffebee; border-color: #f44336;">AI analysis was requested but module not available. Install with: pip install -r requirements.txt</div>'
+        except Exception as e:
+            logger.error(f"Failed to generate AI report section: {e}")
+            # Fallback to simple text display
+            import html
+            ai_section = f'''<div class="ai-analysis-section">
+                <h2>AI Analysis</h2>
+                <div class="ai-content" style="white-space: pre-wrap; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                    {html.escape(ai_analysis)}
+                </div>
+            </div>'''
     
     # Use string replacement instead of format to avoid conflicts with JavaScript template literals
     html_template = """<!DOCTYPE html>
@@ -884,13 +895,28 @@ def generate_cli_output(analyses: List[Dict], comparisons: Optional[List[Dict]] 
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze metric cardinality in Grafana Cloud Mimir to investigate spike issues",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  # Analyze last hour
+  %(prog)s -w 1h
+  
+  # Compare last hour with the hour before
+  %(prog)s -w 1h --compare --compare-window 1h
+  
+  # Analyze specific time period
+  %(prog)s -w 1h -s 2024-01-15T14:00:00
+  
+  # Focus on specific metric
+  %(prog)s -w 1h -m kubernetes_pod_info --ai-analysis
+"""
     )
     
-    parser.add_argument('-w', '--window', required=True,
-                       help='Time window (e.g., 30m, 1h, 24h, 7d)')
-    parser.add_argument('-s', '--start-time',
-                       help='Start time in ISO format (e.g., 2024-01-15T10:00:00 for local time, 2024-01-15T10:00:00Z or 2024-01-15T10:00:00+00:00 for UTC). If not provided, uses current UTC time minus window')
+    parser.add_argument('-w', '--window', '--duration', required=True,
+                       help='Time window duration (e.g., 30m, 1h, 24h, 7d)')
+    parser.add_argument('-s', '--start-time', '--from',
+                       help='Start time in ISO format (e.g., 2024-01-15T10:00:00 for local time, 2024-01-15T10:00:00Z for UTC). '
+                            'If not provided, uses current time minus window duration. '
+                            'This sets the beginning of the analysis window.')
     parser.add_argument('-m', '--metric',
                        help='Specific metric to analyze. If not provided, analyzes top metrics')
     parser.add_argument('--top-n', type=int, default=20,
@@ -903,11 +929,13 @@ def main():
     
     # Comparison options
     parser.add_argument('--compare', action='store_true',
-                       help='Enable comparison mode')
-    parser.add_argument('--compare-window',
-                       help='Time window for comparison (required if --compare is used)')
-    parser.add_argument('--compare-start-time',
-                       help='Start time for comparison window (same format as --start-time)')
+                       help='Enable comparison mode to analyze changes between two time periods')
+    parser.add_argument('--compare-window', '--compare-duration',
+                       help='Duration of the comparison window (e.g., 1h, same format as --window). '
+                            'Required if --compare is used')
+    parser.add_argument('--compare-start-time', '--compare-from',
+                       help='Start time for the comparison window (same format as --start-time). '
+                            'If not provided with --compare, defaults to immediately before the main analysis window')
     
     # AI analysis option
     parser.add_argument('--ai-analysis', action='store_true',
@@ -937,6 +965,7 @@ def main():
     # Validate comparison arguments
     if args.compare and not args.compare_window:
         logger.error("--compare-window is required when using --compare")
+        parser.print_help()
         sys.exit(1)
     
     # Initialize analyzer
@@ -947,7 +976,15 @@ def main():
         start_ts, end_ts = analyzer.parse_time_window(args.window, args.start_time)
         # Format the actual start time for display
         actual_start_time = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-        logger.info(f"Analyzing window: {actual_start_time} to {datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        actual_end_time = datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        
+        # Show a clear summary of what we're analyzing
+        logger.info("="*60)
+        logger.info(f"MAIN ANALYSIS WINDOW:")
+        logger.info(f"  From: {actual_start_time}")
+        logger.info(f"  To:   {actual_end_time}")
+        logger.info(f"  Duration: {args.window}")
+        logger.info("="*60)
         
         # Determine which metrics to analyze
         if args.metric:
@@ -980,16 +1017,45 @@ def main():
                 logger.warning(f"Failed to analyze {metric}: {e}")
         
         if not analyses:
-            logger.error("No successful analyses completed")
+            logger.error("No successful analyses completed. This could mean:")
+            logger.error("  1. No metrics found in the specified time window")
+            logger.error("  2. Connection issues with Mimir/Prometheus")
+            logger.error("  3. Invalid metric name if using -m option")
+            logger.error("Try running with -v for verbose output to see detailed errors")
             sys.exit(1)
         
         # Handle comparison if requested
         comparisons = None
         actual_compare_start_time = None
         if args.compare:
-            comp_start, comp_end = analyzer.parse_time_window(args.compare_window, args.compare_start_time)
+            # If no compare start time specified, default to immediately before the main window
+            if not args.compare_start_time:
+                # Calculate comparison start to be immediately before main window
+                import re
+                match = re.match(r'^(\d+)([smhdw])$', args.compare_window)
+                if match:
+                    duration_map = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+                    compare_duration_seconds = int(match.group(1)) * duration_map[match.group(2)]
+                    # Set comparison to end where main window starts
+                    compare_end_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+                    compare_start_dt = compare_end_dt - timedelta(seconds=compare_duration_seconds)
+                    default_compare_start = compare_start_dt.isoformat()
+                    logger.info(f"No --compare-start-time specified, defaulting to {compare_start_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} (immediately before main window)")
+                    comp_start, comp_end = analyzer.parse_time_window(args.compare_window, default_compare_start)
+                else:
+                    comp_start, comp_end = analyzer.parse_time_window(args.compare_window, args.compare_start_time)
+            else:
+                comp_start, comp_end = analyzer.parse_time_window(args.compare_window, args.compare_start_time)
+            
             actual_compare_start_time = datetime.fromtimestamp(comp_start, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-            logger.info(f"Comparing with window: {actual_compare_start_time} to {datetime.fromtimestamp(comp_end, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            actual_compare_end_time = datetime.fromtimestamp(comp_end, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            
+            logger.info("="*60)
+            logger.info(f"COMPARISON WINDOW (baseline):")
+            logger.info(f"  From: {actual_compare_start_time}")
+            logger.info(f"  To:   {actual_compare_end_time}")
+            logger.info(f"  Duration: {args.compare_window}")
+            logger.info("="*60)
             
             comparisons = []
             for metric in metrics_to_analyze:
@@ -1054,7 +1120,8 @@ def main():
                 f.write(html_content)
             logger.info(f"HTML report written to: {html_file}")
             if args.output == 'html':
-                print(f"\nOpen {html_file} in your browser to view the interactive report")
+                print(f"\n✅ Analysis complete! Open {html_file} in your browser to view the interactive report")
+                print(f"   File: {os.path.abspath(html_file)}")
         
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
