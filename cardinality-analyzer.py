@@ -103,7 +103,8 @@ class CardinalityAnalyzer:
     
     def get_top_metrics(self, start: int, end: int, top_n: int = 20) -> List[Tuple[str, float]]:
         """Get top N metrics by cardinality with their cardinality values"""
-        query = f'topk({top_n}, count by (__name__)({{__name__=~".+"}}))' 
+        # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
+        query = f'topk({top_n}, count by (__name__)({{__name__=~".+", __ignore_usage__=""}}))' 
         
         logger.info(f"Fetching top {top_n} metrics by cardinality...")
         data = self.query_prometheus(query, start, end, step=end-start)
@@ -126,9 +127,10 @@ class CardinalityAnalyzer:
         results = {}
         
         # Get all label names for this metric
+        # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
         url = urljoin(self.endpoint, f'/api/prom/api/v1/labels')
         params = {
-            'match[]': f'{metric_name}',
+            'match[]': f'{metric_name}{{__ignore_usage__=""}}',
             'start': start,
             'end': end
         }
@@ -145,8 +147,9 @@ class CardinalityAnalyzer:
         for label in label_names:
             if label.startswith('__'):  # Skip internal labels
                 continue
-                
-            query = f'count by ({label}) ({metric_name})'
+
+            # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
+            query = f'count by ({label}) ({metric_name}{{__ignore_usage__=""}})'
             try:
                 data = self.query_prometheus(query, start, end, step=end-start)
                 
@@ -178,11 +181,12 @@ class CardinalityAnalyzer:
                 logger.warning(f"Error analyzing label {label} for metric {metric_name}: {e}")
         
         # Also get overall cardinality
+        # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
         if label_names:
             label_list = ", ".join(label_names)
-            query = f'count(count by (__name__, {label_list}) ({metric_name}))'
+            query = f'count(count by (__name__, {label_list}) ({metric_name}{{__ignore_usage__=""}}))'
         else:
-            query = f'count(count by (__name__) ({metric_name}))'
+            query = f'count(count by (__name__) ({metric_name}{{__ignore_usage__=""}}))'
         try:
             data = self.query_prometheus(query, start, end, step=300)
             if data.get('result'):

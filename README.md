@@ -588,3 +588,14 @@ Use this information to:
 2. Implement label filtering in your applications
 3. Configure metric relabeling in your collection pipeline
 4. Set up alerts for cardinality thresholds
+
+## Adaptive Telemetry Compatibility
+
+All queries made by the Cardinality Analyzer include the `__ignore_usage__=""` label selector to prevent interference with [Grafana Cloud Adaptive Telemetry](https://grafana.com/docs/grafana-cloud/adaptive-telemetry/adaptive-metrics/manage-recommendations/understand-recommended-rules/#make-the-recommendations-service-ignore-a-query) recommendations.
+
+This ensures that:
+- Automated analysis queries don't count as "real" user queries
+- The recommendations service won't try to preserve compatibility with these temporary queries
+- Your Adaptive Metrics recommendations remain accurate based on actual dashboard and alerting usage
+
+This feature is always enabled and requires no configuration. The `__ignore_usage__` label selector has no effect on query results—it only signals to the recommendations service to ignore these queries.

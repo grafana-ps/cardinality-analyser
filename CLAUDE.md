@@ -50,6 +50,7 @@ docker run --rm --env-file .env -v $(pwd):/output ghcr.io/grafana-ps/cardinality
    - Time window parsing and comparison logic
    - HTML/CSV/CLI output formatters
    - Metric cardinality calculation algorithms
+   - **Adaptive Telemetry compatibility**: All queries include `__ignore_usage__=""` label selector to prevent interference with Grafana Cloud Adaptive Metrics recommendations
 
 2. **cardinality_analyzer_ai_analysis.py** - AI analysis module:
    - OpenAI integration for analyzing cardinality patterns
