@@ -41,7 +41,7 @@ docker run --rm \
   --env-file .env \
   -v $(pwd):/output \
   ghcr.io/grafana-ps/cardinality-analyser:latest \
-  -w 1h --compare --compare-window 1h --compare-start-time 2024-01-15T10:00:00
+  -w 1h --compare --compare-window 1h --compare-start-time 2024-01-15T10:00:00Z
 ```
 
 **Available Docker tags:**
@@ -102,12 +102,12 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 
 **Analyze a specific historical incident:**
 ```bash
-# Investigate what happened on Jan 10th (24-hour window starting at midnight)
-./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00
+# Investigate what happened on Jan 10th (24-hour window starting at midnight UTC)
+./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00Z
 
 # Compare with the previous day to see what changed
-./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00 \
-  --compare --compare-window 24h --compare-start-time 2024-01-09T00:00:00
+./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00Z \
+  --compare --compare-window 24h --compare-start-time 2024-01-09T00:00:00Z
 ```
 
 ## Command Line Options
@@ -117,8 +117,8 @@ Required:
 -w, --window, --duration    Duration of the time window to analyze (e.g., 30m, 1h, 24h, 7d)
 
 Optional:
--s, --start-time, --from    Start time in ISO format (e.g., 2024-01-15T10:00:00 for local time,
-                            2024-01-15T10:00:00Z for UTC). Default: current time - window duration
+-s, --start-time, --from    Start time in ISO format (e.g., 2024-01-15T10:00:00Z for UTC).
+                            Default: current UTC time - window duration
                             This sets the beginning of the analysis window.
 -m, --metric                Specific metric to analyze. If not provided, analyzes top N metrics
 --top-n                     Number of top metrics to analyze when no specific metric is provided (default: 20)
@@ -129,7 +129,7 @@ Comparison options:
 --compare                   Enable comparison mode to analyze changes between two time periods
 --compare-window,           Duration of the comparison window (e.g., 1h, same format as --window)
 --compare-duration          Required if --compare is used
---compare-start-time,       Start time for the comparison window (same format as --start-time)
+--compare-start-time,       Start time for the comparison window (e.g., 2024-01-15T10:00:00Z)
 --compare-from              If not provided, defaults to immediately before the main analysis window
 
 AI Analysis:
@@ -156,12 +156,40 @@ The script analyzes metrics over two potential time windows:
       (before)              (after)
 ```
 
-## Timezone Handling
+## Timezone Handling and 422 Errors
 
-- When no start time is specified, the script uses current UTC time
-- Start times without timezone info are interpreted as local time
-- Use 'Z' suffix or '+00:00' for UTC times (e.g., 2024-01-15T10:00:00Z)
-- All queries to Mimir are performed using Unix timestamps (timezone-agnostic)
+**This tool operates in UTC** because Grafana Mimir's API only works with UTC timestamps.
+
+### Specifying Timestamps
+
+Timestamps can be provided in several formats:
+- `2024-01-15T10:00:00` - Interpreted as UTC
+- `2024-01-15T10:00:00Z` - Explicit UTC (recommended for clarity)
+- `2024-01-15T10:00:00+00:00` - Explicit UTC with offset notation
+- When no start time is provided, uses current UTC time
+
+### Common Issue: 422 Errors
+
+**Error**: `422 Client Error: Unprocessable Entity`
+
+**Cause**: Mimir rejects queries with timestamps in the future. This can occur due to:
+- System clock drift (your clock is ahead of actual UTC time)
+- Timezone confusion (entering local time instead of UTC)
+- Incorrect timestamp calculation
+
+**Solution**:
+- Ensure your system clock is accurate (check with `date -u`)
+- Always use UTC timestamps
+- Use the `-v` flag for detailed timestamp debugging
+
+**Example**:
+```bash
+# Check current UTC time
+date -u
+
+# Use UTC in queries
+./cardinality-analyzer.py -w 1h -s 2024-01-15T10:00:00Z
+```
 
 ## Output Formats
 
@@ -227,18 +255,15 @@ If no start time (default):
 
 ### 3. Investigate a specific incident time
 ```bash
-# Incident happened at 2PM yesterday (2024-01-14)
-# Analyze the incident hour
-./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00
+# Incident happened at 2PM UTC yesterday (2024-01-14)
+./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00Z
 
 # Compare incident with the hour before to see what changed
-# Compares [13:00-14:00] vs [14:00-15:00] on 2024-01-14
-./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00 --compare --compare-window 1h
+./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00Z --compare --compare-window 1h
 
 # Compare incident with same time on previous day
-# Compares [2024-01-13 14:00-15:00] vs [2024-01-14 14:00-15:00]
-./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00 \
-  --compare --compare-window 1h --compare-start-time 2024-01-13T14:00:00
+./cardinality-analyzer.py -w 1h -s 2024-01-14T14:00:00Z \
+  --compare --compare-window 1h --compare-start-time 2024-01-13T14:00:00Z
 ```
 
 ### 4. Analyze a specific metric
@@ -248,7 +273,7 @@ If no start time (default):
 
 # Compare how this metric changed between yesterday and today
 ./cardinality-analyzer.py -w 4h -m kubernetes_pod_info \
-  --compare --compare-window 4h --compare-start-time 2024-01-14T00:00:00
+  --compare --compare-window 4h --compare-start-time 2024-01-14T00:00:00Z
 ```
 
 ### 5. Export data for further analysis
@@ -264,19 +289,19 @@ If no start time (default):
 ```bash
 # Your deployment happened at 10:30 AM UTC
 # Compare 30 minutes before and after deployment
-./cardinality-analyzer.py -w 30m -s 2024-01-15T10:30:00 \
-  --compare --compare-window 30m --compare-start-time 2024-01-15T10:00:00
+./cardinality-analyzer.py -w 30m -s 2024-01-15T10:30:00Z \
+  --compare --compare-window 30m --compare-start-time 2024-01-15T10:00:00Z
 
 # With AI analysis to get insights
-./cardinality-analyzer.py -w 30m -s 2024-01-15T10:30:00 \
+./cardinality-analyzer.py -w 30m -s 2024-01-15T10:30:00Z \
   --compare --compare-window 30m --ai-analysis
 ```
 
 ### 7. Weekly pattern analysis
 ```bash
 # Compare this Monday with last Monday (business hours)
-./cardinality-analyzer.py -w 8h -s 2024-01-15T09:00:00 \
-  --compare --compare-window 8h --compare-start-time 2024-01-08T09:00:00
+./cardinality-analyzer.py -w 8h -s 2024-01-15T09:00:00Z \
+  --compare --compare-window 8h --compare-start-time 2024-01-08T09:00:00Z
 ```
 
 ## Complete CLI Arguments Reference with Examples
@@ -301,18 +326,18 @@ If no start time (default):
 **Optional**: Sets the beginning of the analysis window.
 
 ```bash
-# ISO format (local timezone if not specified)
-./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00
-
-# ISO format with UTC timezone
+# ISO format with UTC timezone (recommended)
 ./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00Z
 
-# ISO format with timezone offset
-./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00+05:30
+# ISO format with explicit UTC offset
+./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00+00:00
+
+# Without timezone (interpreted as UTC)
+./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00
 
 # What it analyzes:
--w 1h -s 2024-01-15T14:00:00 → Analyzes 14:00:00 to 15:00:00 on Jan 15
--w 24h -s 2024-01-10T00:00:00 → Analyzes entire day of Jan 10
+-w 1h -s 2024-01-15T14:00:00Z → Analyzes 14:00:00 to 15:00:00 UTC on Jan 15
+-w 24h -s 2024-01-10T00:00:00Z → Analyzes entire day of Jan 10 UTC
 ```
 
 ### Metric Selection (`-m`, `--metric`)
@@ -395,14 +420,14 @@ If no start time (default):
 ```bash
 # Compare with yesterday at same time
 ./cardinality-analyzer.py -w 1h --compare --compare-window 1h \
-  --compare-start-time 2024-01-14T14:00:00
+  --compare-start-time 2024-01-14T14:00:00Z
 
 # Compare with last week
-./cardinality-analyzer.py -w 24h -s 2024-01-15T00:00:00 --compare \
-  --compare-window 24h --compare-start-time 2024-01-08T00:00:00
+./cardinality-analyzer.py -w 24h -s 2024-01-15T00:00:00Z --compare \
+  --compare-window 24h --compare-start-time 2024-01-08T00:00:00Z
 
 # If not specified, defaults to immediately before main window:
-./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00 --compare --compare-window 1h
+./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00Z --compare --compare-window 1h
 # Comparison: 13:00-14:00, Main: 14:00-15:00
 ```
 
@@ -441,21 +466,21 @@ Shows you what metrics/labels increased between the previous hour and the curren
 
 ### "What happened during the incident at 2 PM?"
 ```bash
-./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00 --compare --compare-window 1h
+./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00Z --compare --compare-window 1h
 ```
 Analyzes the incident hour and compares with the hour before.
 
 ### "Is this metric behaving differently than yesterday?"
 ```bash
 ./cardinality-analyzer.py -w 4h -m kubernetes_pod_info --compare \
-  --compare-window 4h --compare-start-time 2024-01-14T10:00:00
+  --compare-window 4h --compare-start-time 2024-01-14T10:00:00Z
 ```
 Compares the metric's behavior over 4-hour windows.
 
 ### "Full investigation with all bells and whistles"
 ```bash
-./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00 \
-  --compare --compare-window 1h --compare-start-time 2024-01-15T12:00:00 \
+./cardinality-analyzer.py -w 1h -s 2024-01-15T14:00:00Z \
+  --compare --compare-window 1h --compare-start-time 2024-01-15T12:00:00Z \
   --top-n 30 --ai-analysis -o all -v
 ```
 Analyzes 2-3 PM, compares with 12-1 PM, includes top 30 metrics, AI insights, all output formats, and verbose logging.

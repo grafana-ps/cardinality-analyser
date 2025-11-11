@@ -36,7 +36,12 @@ class CardinalityAnalyzer:
         self.session.auth = self.auth
         
     def parse_time_window(self, window: str, start_time: Optional[str] = None) -> Tuple[int, int]:
-        """Parse time window and return start/end timestamps"""
+        """Parse time window and return start/end timestamps
+
+        All timestamps are processed in UTC to prevent timezone-related errors.
+        If a start_time is provided without an explicit timezone, it will be treated as UTC
+        and a warning will be logged.
+        """
         # Parse duration units
         duration_map = {
             's': 1,
@@ -45,30 +50,68 @@ class CardinalityAnalyzer:
             'd': 86400,
             'w': 604800
         }
-        
+
         # Extract number and unit from window
         import re
         match = re.match(r'^(\d+)([smhdw])$', window)
         if not match:
             raise ValueError(f"Invalid time window format: {window}. Use format like '30m', '1h', '7d'")
-        
+
         value = int(match.group(1))
         unit = match.group(2)
         window_seconds = value * duration_map[unit]
-        
+
         # Calculate timestamps
         if start_time:
-            # Parse start time if provided
+            # Parse start time if provided - ALWAYS use UTC
             try:
+                # Check if timezone is specified
+                has_timezone = start_time.endswith('Z') or '+' in start_time or (start_time.count('-') > 2)
+
+                # Parse the datetime
                 start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            except ValueError:
-                raise ValueError(f"Invalid start time format: {start_time}. Use ISO format: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SS+00:00 (timezone optional, assumes local time if not specified)")
+
+                # If no timezone was specified, assume UTC and warn user
+                if not has_timezone:
+                    logger.warning(f"Start time '{start_time}' has no timezone specified. Treating as UTC. "
+                                 f"Please use UTC format (e.g., '{start_time}Z' or '{start_time}+00:00') to avoid ambiguity.")
+                    # Force UTC timezone if naive datetime
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+
+                # Ensure timezone-aware datetime is in UTC
+                start_dt = start_dt.astimezone(timezone.utc)
+
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid start time format: {start_time}. "
+                    f"Use ISO format in UTC: 'YYYY-MM-DDTHH:MM:SSZ' or 'YYYY-MM-DDTHH:MM:SS+00:00'. "
+                    f"Error: {e}"
+                )
+
             end_dt = start_dt + timedelta(seconds=window_seconds)
         else:
             # Use current time if no start time provided (in UTC)
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(seconds=window_seconds)
-        
+
+        # Validate timestamps are not in the future
+        now_utc = datetime.now(timezone.utc)
+        if start_dt > now_utc:
+            raise ValueError(
+                f"Start time {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} is in the future. "
+                f"Current UTC time is {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}. "
+                f"Please provide a start time in the past using UTC timezone."
+            )
+        if end_dt > now_utc:
+            # Allow a small buffer (10 seconds) for clock skew
+            if (end_dt - now_utc).total_seconds() > 10:
+                raise ValueError(
+                    f"End time {end_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} is in the future. "
+                    f"Current UTC time is {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}. "
+                    f"Please adjust your start time or window duration to query past data only."
+                )
+
         return int(start_dt.timestamp()), int(end_dt.timestamp())
     
     def query_prometheus(self, query: str, start: int, end: int, step: int = 60) -> Dict[str, Any]:
@@ -80,25 +123,76 @@ class CardinalityAnalyzer:
             'end': end,
             'step': step
         }
-        
+
+        # Format timestamps for human readability
+        start_human = datetime.fromtimestamp(start, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        end_human = datetime.fromtimestamp(end, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+
         try:
             logger.debug(f"Executing query: {query}")
-            logger.debug(f"Time range: {datetime.fromtimestamp(start, tz=timezone.utc)} to {datetime.fromtimestamp(end, tz=timezone.utc)}")
-            
+            logger.debug(f"Time range: {start_human} to {end_human}")
+            logger.debug(f"Parameters: start={start}, end={end}, step={step}")
+
             response = self.session.get(url, params=params, timeout=300)
             response.raise_for_status()
             data = response.json()
-            
+
             if data.get('status') != 'success':
                 raise Exception(f"Query failed: {data.get('error', 'Unknown error')}")
-            
+
             # Log if no results returned
             if not data['data'].get('result'):
                 logger.warning(f"Query returned no results: {query}")
-            
+
             return data['data']
+        except requests.exceptions.HTTPError as e:
+            # Enhanced error diagnostics for HTTP errors
+            status_code = e.response.status_code if hasattr(e, 'response') else 'Unknown'
+
+            # Log detailed error information
+            logger.error("="*80)
+            logger.error(f"HTTP ERROR {status_code}: Failed to query Prometheus")
+            logger.error("="*80)
+            logger.error(f"Query: {query}")
+            logger.error(f"Time range: {start_human} to {end_human}")
+            logger.error(f"Unix timestamps: start={start}, end={end}, step={step}")
+            logger.error(f"URL: {response.url if hasattr(e, 'response') else url}")
+
+            # Try to extract error details from response body
+            if hasattr(e, 'response'):
+                try:
+                    error_data = e.response.json()
+                    if 'error' in error_data:
+                        logger.error(f"Mimir error message: {error_data['error']}")
+                    if 'errorType' in error_data:
+                        logger.error(f"Error type: {error_data['errorType']}")
+                except:
+                    # If response is not JSON, log raw text
+                    logger.error(f"Response body: {e.response.text[:500]}")
+
+            # Provide specific guidance for common errors
+            if status_code == 422:
+                logger.error("NOTE: 422 errors often indicate timestamps in the future due to clock drift or timezone issues. Ensure system clock is accurate and timestamps are in UTC.")
+            elif status_code == 400:
+                logger.error("NOTE: 400 errors typically indicate invalid query syntax or parameters.")
+            elif status_code == 429:
+                logger.error("NOTE: 429 errors indicate rate limiting. Too many requests sent to Mimir.")
+            elif status_code >= 500:
+                logger.error("NOTE: 5xx errors indicate a Mimir/Prometheus server-side issue.")
+
+            logger.error("="*80)
+            raise
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error querying Prometheus: {e}")
+            # Handle other request exceptions (timeouts, connection errors, etc.)
+            logger.error("="*80)
+            logger.error(f"REQUEST ERROR: Failed to query Prometheus")
+            logger.error("="*80)
+            logger.error(f"Query: {query}")
+            logger.error(f"Time range: {start_human} to {end_human}")
+            logger.error(f"Unix timestamps: start={start}, end={end}, step={step}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error details: {e}")
+            logger.error("="*80)
             raise
     
     def get_top_metrics(self, start: int, end: int, top_n: int = 20) -> List[Tuple[str, float]]:
@@ -151,14 +245,18 @@ class CardinalityAnalyzer:
             # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
             query = f'count by ({label}) ({metric_name}{{__ignore_usage__=""}})'
             try:
-                data = self.query_prometheus(query, start, end, step=end-start)
-                
-                # Calculate average cardinality over the time window
+                # Use step=300 (5 minutes) to capture cardinality variation and bursts
+                # This aligns with the total cardinality query and allows detecting
+                # cardinality spikes that occur during the window
+                data = self.query_prometheus(query, start, end, step=300)
+
+                # Calculate max cardinality over the time window to capture bursts
                 label_cardinalities = defaultdict(list)
                 for result in data.get('result', []):
                     label_value = result['metric'].get(label, 'unknown')
                     values = [float(v[1]) for v in result['values'] if v[1] != 'NaN']
                     if values:
+                        # Take max to capture peak cardinality during bursts
                         label_cardinalities[label_value].append(max(values))
                 
                 # Calculate total unique label values
@@ -903,23 +1001,31 @@ def main():
         epilog="""Examples:
   # Analyze last hour
   %(prog)s -w 1h
-  
+
   # Compare last hour with the hour before
   %(prog)s -w 1h --compare --compare-window 1h
-  
-  # Analyze specific time period
-  %(prog)s -w 1h -s 2024-01-15T14:00:00
-  
-  # Focus on specific metric
+
+  # Analyze specific time period (ALWAYS use UTC with 'Z' suffix)
+  %(prog)s -w 1h -s 2024-01-15T14:00:00Z
+
+  # Focus on specific metric with AI analysis
   %(prog)s -w 1h -m kubernetes_pod_info --ai-analysis
+
+  # Compare specific time windows (both in UTC)
+  %(prog)s -w 1h -s 2024-01-15T15:00:00Z --compare --compare-window 1h --compare-start-time 2024-01-15T14:00:00Z
+
+IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to specify UTC explicitly.
 """
     )
     
     parser.add_argument('-w', '--window', '--duration', required=True,
                        help='Time window duration (e.g., 30m, 1h, 24h, 7d)')
     parser.add_argument('-s', '--start-time', '--from',
-                       help='Start time in ISO format (e.g., 2024-01-15T10:00:00 for local time, 2024-01-15T10:00:00Z for UTC). '
-                            'If not provided, uses current time minus window duration. '
+                       help='Start time in ISO format using UTC timezone. '
+                            'IMPORTANT: Always use UTC! Examples: '
+                            '2024-01-15T10:00:00Z or 2024-01-15T10:00:00+00:00. '
+                            'If timezone is omitted, UTC is assumed with a warning. '
+                            'If not provided, uses current UTC time minus window duration. '
                             'This sets the beginning of the analysis window.')
     parser.add_argument('-m', '--metric',
                        help='Specific metric to analyze. If not provided, analyzes top metrics')
@@ -930,7 +1036,7 @@ def main():
                        help='Output format (default: html)')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
-    
+
     # Comparison options
     parser.add_argument('--compare', action='store_true',
                        help='Enable comparison mode to analyze changes between two time periods')
@@ -938,7 +1044,8 @@ def main():
                        help='Duration of the comparison window (e.g., 1h, same format as --window). '
                             'Required if --compare is used')
     parser.add_argument('--compare-start-time', '--compare-from',
-                       help='Start time for the comparison window (same format as --start-time). '
+                       help='Start time for the comparison window in UTC (same format as --start-time). '
+                            'Examples: 2024-01-15T10:00:00Z. '
                             'If not provided with --compare, defaults to immediately before the main analysis window')
     
     # AI analysis option
