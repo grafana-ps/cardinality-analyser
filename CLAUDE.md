@@ -32,13 +32,13 @@ python3 -m pip install -r requirements.txt
 ./cardinality-analyzer.py -w 1h --ai-analysis
 ```
 
-### Docker Operations
+### Docker (Alternative)
 ```bash
 # Build Docker image locally
 docker build -t cardinality-analyser .
 
 # Run with Docker
-docker run --rm --env-file .env -v $(pwd):/output ghcr.io/grafana-ps/cardinality-analyser:latest -w 1h
+docker run --rm --env-file .env -v $(pwd):/output cardinality-analyser -w 1h
 ```
 
 ## Architecture
@@ -77,7 +77,6 @@ Environment variables (in `.env`):
 ### CI/CD
 
 GitHub Actions workflow (`.github/workflows/docker-publish.yml`):
-- Builds multi-architecture Docker images (amd64, arm64)
-- Publishes to `ghcr.io/grafana-ps/cardinality-analyser`
-- Runs security scans with Trivy
-- Triggers on: main branch pushes, tags, and weekly schedule
+- Validates Python script syntax
+- Runs on: push to main branch, pull requests, and manual dispatch
+- Can be extended for linting and testing

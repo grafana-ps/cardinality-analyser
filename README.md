@@ -19,37 +19,6 @@ The `cardinality-analyzer.py` script helps diagnose "what's the root cause of my
 
 ## Quick Start
 
-### Using Docker (Recommended)
-
-The easiest way to run the Cardinality Analyzer is using the pre-built Docker image:
-
-```bash
-# Pull the latest image
-docker pull ghcr.io/grafana-ps/cardinality-analyser:latest
-
-# Run with environment variables
-docker run --rm \
-  -e PROMETHEUS_ENDPOINT="https://prometheus-prod-13-prod-us-east-0.grafana.net" \
-  -e PROMETHEUS_USERNAME="1234567" \
-  -e PROMETHEUS_API_KEY="glc_key-example-..." \
-  -v $(pwd):/output \
-  ghcr.io/grafana-ps/cardinality-analyser:latest \
-  -w 1h -o html
-
-# Or using an env file
-docker run --rm \
-  --env-file .env \
-  -v $(pwd):/output \
-  ghcr.io/grafana-ps/cardinality-analyser:latest \
-  -w 1h --compare --compare-window 1h --compare-start-time 2024-01-15T10:00:00Z
-```
-
-**Available Docker tags:**
-- `latest` - Latest stable release from main branch
-- `vX.Y.Z` - Specific version releases
-- `main-SHA` - Specific commits from main branch
-- `nightly` - Nightly builds (may be unstable)
-
 ### Local Installation
 
 #### 1. Set up environment
@@ -108,6 +77,37 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 # Compare with the previous day to see what changed
 ./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00Z \
   --compare --compare-window 24h --compare-start-time 2024-01-09T00:00:00Z
+```
+
+### Using Docker (Alternative)
+
+You can also build and run the tool locally using Docker if you prefer containerization:
+
+#### 1. Build the Docker image
+
+```bash
+# Build for your current platform
+docker build -t cardinality-analyser .
+```
+
+#### 2. Run with Docker
+
+```bash
+# Run with environment variables
+docker run --rm \
+  -e PROMETHEUS_ENDPOINT="https://prometheus-prod-13-prod-us-east-0.grafana.net" \
+  -e PROMETHEUS_USERNAME="1234567" \
+  -e PROMETHEUS_API_KEY="glc_key-example-..." \
+  -v $(pwd):/output \
+  cardinality-analyser \
+  -w 1h -o html
+
+# Or using an env file
+docker run --rm \
+  --env-file .env \
+  -v $(pwd):/output \
+  cardinality-analyser \
+  -w 1h --compare --compare-window 1h
 ```
 
 ## Command Line Options
@@ -567,39 +567,6 @@ If AI analysis fails:
 2. Verify the API key has sufficient credits
 3. Ensure you've installed dependencies: `pip install -r requirements.txt`
 4. Check logs for specific error messages
-
-## Building the Docker Image
-
-### Building Locally
-
-To build the Docker image locally:
-
-```bash
-# Build for your current platform
-docker build -t cardinality-analyser .
-
-# Build multi-platform image (requires Docker Buildx)
-docker buildx build --platform linux/amd64,linux/arm64 -t cardinality-analyser .
-
-# Run locally built image
-docker run --rm --env-file .env -v $(pwd):/output cardinality-analyser -w 1h
-```
-
-### GitHub Actions CI/CD
-
-The project includes automated Docker image building and publishing via GitHub Actions:
-
-- **Automatic builds** on push to main branch
-- **Multi-architecture support** (linux/amd64 and linux/arm64)
-- **Container registry** at `ghcr.io/grafana-ps/cardinality-analyser`
-- **Security scanning** with Trivy for vulnerability detection
-- **Nightly builds** every Monday at 2 AM UTC
-
-The workflow automatically:
-1. Builds native images for each architecture in parallel
-2. Creates and pushes multi-arch manifest
-3. Tags releases appropriately (latest, version tags, SHA tags)
-4. Runs security scans on scheduled builds
 
 ## Understanding the Results
 
