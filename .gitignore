@@ -133,6 +133,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env*
 .venv
 env/
 venv/
@@ -188,3 +189,5 @@ metric_rates.json
 cardinality_analysis.html
 
 cardinality_analysis.csv
+
+cardinality_analysis.html.zip

@@ -62,6 +62,15 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 ./cardinality-analyzer.py -w 1h -m my_application_requests_total
 ```
 
+**Analyze multiple metrics from a file:**
+```bash
+# Analyze metrics listed in a file (one per line)
+./cardinality-analyzer.py -w 1h -mf metrics.txt
+
+# Combine file metrics with a single metric
+./cardinality-analyzer.py -w 1h -m custom_metric -mf metrics.txt
+```
+
 **Compare time windows (automatic before/after):**
 ```bash
 # Compares the hour before vs the last hour
@@ -78,6 +87,36 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 ./cardinality-analyzer.py -w 24h -s 2024-01-10T00:00:00Z \
   --compare --compare-window 24h --compare-start-time 2024-01-09T00:00:00Z
 ```
+
+### Metrics File Format
+
+When using `-mf` / `--metrics-file`, create a text file with one metric name per line:
+
+```
+# Production metrics
+http_requests_total
+http_request_duration_seconds
+
+# Database metrics
+db_connections_active
+db_query_duration_seconds
+
+# Application metrics
+app_processing_time_seconds
+```
+
+**Features:**
+- One metric name per line
+- Lines starting with `#` are treated as comments
+- Blank lines are ignored
+- Leading/trailing whitespace is automatically stripped
+- Can be combined with `-m` option to add additional metrics
+
+**Use cases:**
+- Analyzing large sets of metrics without overwhelming the system
+- Automating analysis for specific metric groups
+- Avoiding "too many chunks" errors by analyzing metrics individually
+- Creating reusable metric lists for regular analysis
 
 ### Using Docker (Alternative)
 
@@ -121,6 +160,8 @@ Optional:
                             Default: current UTC time - window duration
                             This sets the beginning of the analysis window.
 -m, --metric                Specific metric to analyze. If not provided, analyzes top N metrics
+-mf, --metrics-file         Path to file containing metric names (one per line).
+                            Supports # comments and blank lines. Can be combined with -m option
 --top-n                     Number of top metrics to analyze when no specific metric is provided (default: 20)
 -o, --output                Output format: cli, csv, html, all (default: html)
 -h, --help                  Show help message and exit
@@ -371,7 +412,31 @@ If no start time (default):
   --compare --compare-window 4h --compare-start-time 2024-01-14T00:00:00Z
 ```
 
-### 5. Export data for further analysis
+### 5. Analyze multiple metrics from a file
+```bash
+# Create a metrics file with your target metrics
+cat > my_metrics.txt <<EOF
+# Application metrics
+http_requests_total
+http_request_duration_seconds
+app_errors_total
+
+# Database metrics
+db_connections_active
+db_query_duration_seconds
+EOF
+
+# Analyze all metrics in the file
+./cardinality-analyzer.py -w 1h -mf my_metrics.txt
+
+# Analyze file metrics with comparison
+./cardinality-analyzer.py -w 1h -mf my_metrics.txt --compare --compare-window 1h
+
+# Combine file metrics with additional single metric
+./cardinality-analyzer.py -w 1h -mf my_metrics.txt -m additional_metric
+```
+
+### 6. Export data for further analysis
 ```bash
 # Get top 50 metrics as CSV for spreadsheet analysis
 ./cardinality-analyzer.py -w 30m --top-n 50 -o csv
@@ -380,7 +445,7 @@ If no start time (default):
 ./cardinality-analyzer.py -w 1h -o all
 ```
 
-### 6. Debugging deployment issues
+### 7. Debugging deployment issues
 ```bash
 # Your deployment happened at 10:30 AM UTC
 # Compare 30 minutes before and after deployment
@@ -392,7 +457,7 @@ If no start time (default):
   --compare --compare-window 30m --ai-analysis
 ```
 
-### 7. Weekly pattern analysis
+### 8. Weekly pattern analysis
 ```bash
 # Compare this Monday with last Monday (business hours)
 ./cardinality-analyzer.py -w 8h -s 2024-01-15T09:00:00Z \
@@ -447,6 +512,28 @@ If no start time (default):
 
 # With AI analysis for deep insights
 ./cardinality-analyzer.py -w 1h -m problematic_metric --ai-analysis
+```
+
+### Metrics File (`-mf`, `--metrics-file`)
+**Optional**: Analyze multiple metrics from a file (one metric name per line).
+
+```bash
+# Analyze metrics from a file
+./cardinality-analyzer.py -w 1h -mf metrics.txt
+
+# With comparison mode
+./cardinality-analyzer.py -w 1h -mf metrics.txt --compare --compare-window 1h
+
+# Combine file metrics with single metric
+./cardinality-analyzer.py -w 1h -mf metrics.txt -m additional_metric
+
+# File format (supports comments and blank lines):
+# # Production metrics
+# http_requests_total
+# http_request_duration_seconds
+#
+# # Database metrics
+# db_connections_active
 ```
 
 ### Top N Metrics (`--top-n`)
@@ -585,6 +672,20 @@ Analyzes 2-3 PM, compares with 12-1 PM, includes top 30 metrics, AI insights, al
 ./cardinality-analyzer.py -w 30m --top-n 5 -o cli
 ```
 Fast 30-minute analysis of top 5 metrics, displayed in terminal.
+
+### "Analyze specific metric group without overwhelming the system"
+```bash
+# Create file with metrics to monitor
+cat > critical_metrics.txt <<EOF
+api_requests_total
+api_response_time_seconds
+database_connections
+cache_hit_ratio
+EOF
+
+./cardinality-analyzer.py -w 1h -mf critical_metrics.txt --compare --compare-window 1h
+```
+Analyzes a specific set of metrics individually, avoiding "too many chunks" errors while still getting comprehensive analysis.
 
 ### "Export data for presentation"
 ```bash

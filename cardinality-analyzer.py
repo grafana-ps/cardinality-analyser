@@ -1196,6 +1196,8 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
                             'This sets the beginning of the analysis window.')
     parser.add_argument('-m', '--metric',
                        help='Specific metric to analyze. If not provided, analyzes top metrics')
+    parser.add_argument('-mf', '--metrics-file',
+                       help='Path to file containing metric names (one per line). Supports # comments and blank lines. Can be combined with -m option')
     parser.add_argument('--top-n', type=int, default=20,
                        help='Number of top metrics to analyze when no specific metric is provided (default: 20)')
     parser.add_argument('-o', '--output', default='html',
@@ -1276,9 +1278,46 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
         logger.info("="*60)
         
         # Determine which metrics to analyze
+        metrics_to_analyze = []
+
+        # Add single metric if provided
         if args.metric:
-            metrics_to_analyze = [args.metric]
-        else:
+            metrics_to_analyze.append(args.metric)
+            logger.info(f"Single metric specified: {args.metric}")
+
+        # Add metrics from file if provided
+        if args.metrics_file:
+            logger.info(f"Reading metrics from file: {args.metrics_file}")
+            try:
+                with open(args.metrics_file, 'r') as f:
+                    file_metrics = []
+                    for line_num, line in enumerate(f, 1):
+                        # Strip whitespace
+                        line = line.strip()
+                        # Skip blank lines and comments
+                        if not line or line.startswith('#'):
+                            continue
+                        file_metrics.append(line)
+
+                    if not file_metrics:
+                        logger.error(f"No valid metrics found in {args.metrics_file}")
+                        sys.exit(1)
+
+                    logger.info(f"Loaded {len(file_metrics)} metric(s) from file:")
+                    for metric in file_metrics:
+                        logger.info(f"  - {metric}")
+
+                    metrics_to_analyze.extend(file_metrics)
+
+            except FileNotFoundError:
+                logger.error(f"Metrics file not found: {args.metrics_file}")
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f"Failed to read metrics file: {e}")
+                sys.exit(1)
+
+        # If no metrics specified, get top metrics by cardinality
+        if not metrics_to_analyze:
             # Get top metrics by cardinality
             top_metrics = analyzer.get_top_metrics(start_ts, end_ts, args.top_n)
             if not top_metrics:
@@ -1288,13 +1327,17 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
             logger.info(f"Top {len(top_metrics)} metrics by cardinality:")
             for metric, cardinality in top_metrics[:args.top_n]:
                 logger.info(f"  {metric}: {cardinality:.0f}")
-            
+
             metrics_to_analyze = [metric for metric, cardinality in top_metrics]
         
         # Analyze each metric
         analyses = []
-        for metric in metrics_to_analyze:
-            logger.info(f"Analyzing cardinality for metric: {metric}")
+        total_metrics = len(metrics_to_analyze)
+        for idx, metric in enumerate(metrics_to_analyze, 1):
+            if total_metrics > 1:
+                logger.info(f"Analyzing metric {idx}/{total_metrics}: {metric}")
+            else:
+                logger.info(f"Analyzing cardinality for metric: {metric}")
             try:
                 cardinality_data = analyzer.analyze_metric_cardinality(
                     metric, start_ts, end_ts,

@@ -1,0 +1,13 @@
+# Sample metrics file for testing
+# This file demonstrates the supported format
+
+# Web server metrics
+http_requests_total
+http_request_duration_seconds
+
+# Database metrics
+
+db_connections_active
+
+# Application metrics
+app_processing_time_seconds

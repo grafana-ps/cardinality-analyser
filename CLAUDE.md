@@ -25,6 +25,12 @@ python3 -m pip install -r requirements.txt
 # Analyze specific metric
 ./cardinality-analyzer.py -w 1h -m my_application_requests_total
 
+# Analyze multiple metrics from a file
+./cardinality-analyzer.py -w 1h -mf metrics.txt
+
+# Combine file metrics with additional single metric
+./cardinality-analyzer.py -w 1h -mf metrics.txt -m additional_metric
+
 # Compare time windows (before/after)
 ./cardinality-analyzer.py -w 1h --compare --compare-window 1h --compare-start-time 2024-01-15T10:00:00
 
