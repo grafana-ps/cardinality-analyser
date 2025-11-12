@@ -125,6 +125,13 @@ Optional:
 -o, --output                Output format: cli, csv, html, all (default: html)
 -h, --help                  Show help message and exit
 
+Performance tuning options:
+--step                      Query step interval in seconds. Auto-calculated if not specified.
+                            Larger values reduce data points and prevent chunk limit errors.
+                            Examples: 60 (1min), 300 (5min), 3600 (1hour)
+--max-points                Target number of data points per series for auto-calculation (default: 150).
+                            Lower values use larger steps and reduce chunk errors.
+
 Comparison options:
 --compare                   Enable comparison mode to analyze changes between two time periods
 --compare-window,           Duration of the comparison window (e.g., 1h, same format as --window)
@@ -190,6 +197,94 @@ date -u
 # Use UTC in queries
 ./cardinality-analyzer.py -w 1h -s 2024-01-15T10:00:00Z
 ```
+
+## Query Performance and Chunk Limits
+
+The analyzer automatically optimizes query performance to prevent "too many chunks" errors from Grafana Mimir, which occur when queries try to fetch too much data.
+
+### Automatic Step Optimization
+
+The tool automatically calculates optimal query intervals (step size) based on your time window:
+
+- **1 hour**: ~60-second intervals (~60 data points per series)
+- **24 hours**: ~5-10 minute intervals (~150 data points per series)
+- **7 days**: ~1 hour intervals (~168 data points per series)
+- **30 days**: ~5 hour intervals (~150 data points per series)
+
+**Why larger steps?** Larger step = Fewer evaluations = Fewer data points = Fewer chunks fetched = No errors!
+
+### Manual Performance Tuning
+
+If you need more control, use these options:
+
+```bash
+# Use specific step size (in seconds)
+./cardinality-analyzer.py -w 7d --step 3600  # 1-hour intervals
+
+# Control target data points (default: 150)
+./cardinality-analyzer.py -w 24h --max-points 100  # Fewer points = larger step = faster queries
+./cardinality-analyzer.py -w 24h --max-points 300  # More points = smaller step = better resolution
+```
+
+### Automatic Retry on Errors
+
+If a query hits chunk limits, the analyzer automatically retries with larger step sizes (up to 3 attempts). You'll see warnings like:
+
+```
+Query hit chunk limit (attempt 1/3). Retrying with larger step: 600s (10min)
+```
+
+### Performance Recommendations
+
+**For large time ranges (7+ days):**
+```bash
+# Let the tool auto-optimize
+./cardinality-analyzer.py -w 7d
+
+# Or manually specify larger step
+./cardinality-analyzer.py -w 7d --step 3600  # 1-hour intervals
+
+# Focus on specific metrics to reduce load
+./cardinality-analyzer.py -w 7d -m my_specific_metric --top-n 10
+```
+
+**For very large tenants:**
+```bash
+# Use shorter windows
+./cardinality-analyzer.py -w 12h --compare --compare-window 12h
+
+# Or larger steps for longer windows
+./cardinality-analyzer.py -w 7d --step 7200  # 2-hour intervals
+
+# Or fewer metrics
+./cardinality-analyzer.py -w 24h --top-n 5
+```
+
+### Understanding "Too Many Chunks" Errors
+
+If you see HTTP 422 errors mentioning "chunks", the script will show detailed guidance:
+
+```
+NOTE: 422 error due to TOO MANY CHUNKS
+This query is trying to fetch too much data and exceeded Mimir's chunk limit.
+
+SOLUTIONS:
+  1. Reduce time window: Use shorter --window duration
+     Example: -w 12h instead of -w 7d
+
+  2. Increase step: Add --step parameter with larger value
+     Example: --step 1200 (currently using step=300s)
+
+  3. Focus analysis: Use -m to analyze specific metrics instead of top-N
+     Example: -m my_specific_metric
+```
+
+### Tradeoffs
+
+- **Smaller step (more data points)**: Better temporal resolution, can detect short spikes, but may hit limits
+- **Larger step (fewer data points)**: Always works, faster queries, but may miss brief cardinality spikes
+
+For cardinality trend analysis, larger steps are usually fine since cardinality changes tend to persist.
 
 ## Output Formats
 

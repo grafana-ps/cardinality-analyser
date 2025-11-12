@@ -30,6 +30,11 @@ python3 -m pip install -r requirements.txt
 
 # With AI analysis (requires OPENAI_API_KEY)
 ./cardinality-analyzer.py -w 1h --ai-analysis
+
+# Performance tuning for long time ranges (prevents "too many chunks" errors)
+./cardinality-analyzer.py -w 7d --step 3600  # 1-hour intervals for 7-day analysis
+./cardinality-analyzer.py -w 30d --max-points 100  # Lower resolution for very long ranges
+./cardinality-analyzer.py -w 24h --step 600  # 10-minute intervals for 24-hour analysis
 ```
 
 ### Docker (Alternative)
@@ -51,6 +56,9 @@ docker run --rm --env-file .env -v $(pwd):/output cardinality-analyser -w 1h
    - HTML/CSV/CLI output formatters
    - Metric cardinality calculation algorithms
    - **Adaptive Telemetry compatibility**: All queries include `__ignore_usage__=""` label selector to prevent interference with Grafana Cloud Adaptive Metrics recommendations
+   - **Automatic query optimization**: Dynamically calculates optimal step sizes based on time ranges to prevent "too many chunks" errors
+   - **Automatic retry logic**: Retries failed queries with larger step sizes when chunk limits are hit
+   - **Performance tuning options**: `--step` and `--max-points` parameters for manual control
 
 2. **cardinality_analyzer_ai_analysis.py** - AI analysis module:
    - OpenAI integration for analyzing cardinality patterns

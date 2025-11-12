@@ -112,8 +112,118 @@ class CardinalityAnalyzer:
                     f"Please adjust your start time or window duration to query past data only."
                 )
 
+        # Validate and warn about large time ranges
+        duration_seconds = int(end_dt.timestamp()) - int(start_dt.timestamp())
+        duration_days = duration_seconds / 86400
+
+        MAX_RECOMMENDED_DAYS = 7
+        if duration_days > MAX_RECOMMENDED_DAYS:
+            logger.warning("="*60)
+            logger.warning(f"LARGE TIME RANGE WARNING: {duration_days:.1f} days")
+            logger.warning("="*60)
+            logger.warning(f"Analyzing long time ranges may hit Mimir query limits.")
+            logger.warning(f"The script will automatically use larger step sizes, but:")
+            logger.warning(f"  - Temporal resolution will be reduced")
+            logger.warning(f"  - Short-lived cardinality spikes may be missed")
+            logger.warning(f"  - Queries may still fail on very large tenants")
+            logger.warning("")
+            logger.warning("Recommendations:")
+            logger.warning(f"  1. Consider shorter windows (e.g., -w 24h or -w 3d)")
+            logger.warning(f"  2. Use --step parameter to manually control resolution")
+            logger.warning(f"  3. Focus on specific metrics with -m instead of top-N")
+            logger.warning("="*60)
+
         return int(start_dt.timestamp()), int(end_dt.timestamp())
-    
+
+    def calculate_optimal_step(self, start: int, end: int, target_points: int = 150, min_step: int = 60) -> int:
+        """
+        Calculate optimal step size to target a specific number of data points.
+
+        This helps prevent "too many chunks" errors in Mimir by reducing the number
+        of data points fetched per query. Larger step = fewer evaluations = fewer chunks.
+
+        Args:
+            start: Start timestamp
+            end: End timestamp
+            target_points: Desired number of data points (default: 150)
+            min_step: Minimum step in seconds (default: 60)
+
+        Returns:
+            Optimal step size in seconds
+        """
+        duration = end - start
+
+        # Calculate step to achieve target points
+        calculated_step = duration // target_points
+
+        # Enforce minimum step
+        step = max(min_step, calculated_step)
+
+        # Round to nearest minute for cleaner values
+        step = (step // 60) * 60
+
+        # Ensure at least 60 seconds
+        step = max(60, step)
+
+        logger.debug(f"Calculated optimal step: {step}s for {duration}s duration (target: {target_points} points)")
+
+        return step
+
+    def query_prometheus_with_retry(self, query: str, start: int, end: int, step: int = 60, max_retries: int = 3) -> Dict[str, Any]:
+        """
+        Query Prometheus/Mimir with automatic retry on chunk limit errors.
+
+        If a query fails with a "too many chunks" error (HTTP 422), automatically
+        retry with a larger step size (doubled on each attempt).
+
+        Args:
+            query: PromQL query string
+            start: Start timestamp
+            end: End timestamp
+            step: Initial step size in seconds
+            max_retries: Maximum number of retry attempts (default: 3)
+
+        Returns:
+            Query result data
+
+        Raises:
+            Exception: If query fails after all retries
+        """
+        current_step = step
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                return self.query_prometheus(query, start, end, current_step)
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                if hasattr(e, 'response') and e.response.status_code == 422:
+                    # Check if this is a chunk-related error
+                    error_body = ""
+                    try:
+                        error_data = e.response.json()
+                        error_body = str(error_data.get('error', '')).lower()
+                    except:
+                        error_body = e.response.text.lower()
+
+                    # If it's a chunk error, retry with larger step
+                    if ('chunk' in error_body or 'too many' in error_body) and attempt < max_retries - 1:
+                        # Double the step and retry
+                        current_step *= 2
+                        logger.warning(
+                            f"Query hit chunk limit (attempt {attempt + 1}/{max_retries}). "
+                            f"Retrying with larger step: {current_step}s ({current_step//60}min)"
+                        )
+                        continue
+                # If not a chunk error or last attempt, re-raise
+                raise
+            except Exception as e:
+                # For non-HTTP errors, don't retry
+                raise
+
+        # If we get here, all retries failed
+        raise last_error if last_error else Exception(f"Failed to execute query after {max_retries} attempts")
+
     def query_prometheus(self, query: str, start: int, end: int, step: int = 60) -> Dict[str, Any]:
         """Execute a Prometheus query over a time range"""
         url = urljoin(self.endpoint, '/api/prom/api/v1/query_range')
@@ -172,7 +282,39 @@ class CardinalityAnalyzer:
 
             # Provide specific guidance for common errors
             if status_code == 422:
-                logger.error("NOTE: 422 errors often indicate timestamps in the future due to clock drift or timezone issues. Ensure system clock is accurate and timestamps are in UTC.")
+                # Check if this is a "too many chunks" error
+                error_body = ""
+                if hasattr(e, 'response'):
+                    try:
+                        error_data = e.response.json()
+                        error_body = str(error_data.get('error', '')).lower()
+                    except:
+                        error_body = e.response.text.lower()
+
+                # Detect chunk-related errors
+                if 'chunk' in error_body or 'too many' in error_body:
+                    logger.error("="*80)
+                    logger.error("NOTE: 422 error due to TOO MANY CHUNKS")
+                    logger.error("="*80)
+                    logger.error("This query is trying to fetch too much data and exceeded Mimir's chunk limit.")
+                    logger.error("")
+                    logger.error("SOLUTIONS:")
+                    logger.error("  1. Reduce time window: Use shorter --window duration")
+                    logger.error("     Example: -w 12h instead of -w 7d")
+                    logger.error("")
+                    logger.error("  2. Increase step: Add --step parameter with larger value")
+                    logger.error(f"     Example: --step {step * 2} (currently using step={step}s)")
+                    logger.error("")
+                    logger.error("  3. Focus analysis: Use -m to analyze specific metrics instead of top-N")
+                    logger.error("     Example: -m my_specific_metric")
+                    logger.error("")
+                    logger.error(f"Current query details: {(end-start)/3600:.1f}h window, step={step}s")
+                    logger.error(f"  = {(end-start)//step} data points per series")
+                    logger.error("="*80)
+                else:
+                    # Original 422 error handling for timezone issues
+                    logger.error("NOTE: 422 errors often indicate timestamps in the future due to clock drift or timezone issues.")
+                    logger.error("Ensure system clock is accurate and timestamps are in UTC.")
             elif status_code == 400:
                 logger.error("NOTE: 400 errors typically indicate invalid query syntax or parameters.")
             elif status_code == 429:
@@ -198,10 +340,10 @@ class CardinalityAnalyzer:
     def get_top_metrics(self, start: int, end: int, top_n: int = 20) -> List[Tuple[str, float]]:
         """Get top N metrics by cardinality with their cardinality values"""
         # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
-        query = f'topk({top_n}, count by (__name__)({{__name__=~".+", __ignore_usage__=""}}))' 
-        
+        query = f'topk({top_n}, count by (__name__)({{__name__=~".+", __ignore_usage__=""}}))'
+
         logger.info(f"Fetching top {top_n} metrics by cardinality...")
-        data = self.query_prometheus(query, start, end, step=end-start)
+        data = self.query_prometheus_with_retry(query, start, end, step=end-start)
         
         metrics = []
         for result in data.get('result', []):
@@ -216,9 +358,34 @@ class CardinalityAnalyzer:
         
         return metrics
     
-    def analyze_metric_cardinality(self, metric_name: str, start: int, end: int) -> Dict[str, Dict[str, Any]]:
-        """Analyze cardinality for a specific metric by label"""
+    def analyze_metric_cardinality(self, metric_name: str, start: int, end: int,
+                                   custom_step: Optional[int] = None, target_points: int = 150) -> Dict[str, Dict[str, Any]]:
+        """Analyze cardinality for a specific metric by label
+
+        Args:
+            metric_name: Name of the metric to analyze
+            start: Start timestamp
+            end: End timestamp
+            custom_step: Optional custom step size in seconds. If None, automatically calculated.
+            target_points: Target number of data points for auto-calculation (default: 150)
+        """
         results = {}
+
+        # Calculate optimal step if not provided
+        if custom_step is None:
+            # Use adaptive step based on time range
+            step = self.calculate_optimal_step(start, end, target_points=target_points)
+        else:
+            step = custom_step
+
+        duration_hours = (end - start) / 3600
+        data_points = (end - start) // step
+        logger.info(f"Using step={step}s ({step//60}min) for {duration_hours:.1f}h analysis window (~{data_points} data points per series)")
+
+        # Warn about potential issues with very long ranges
+        if data_points > 500:
+            logger.warning(f"Query will fetch ~{data_points} data points per series. This may be slow or hit Mimir limits.")
+            logger.warning(f"Consider using --step {step * 2} to reduce data points, or shorter time windows.")
         
         # Get all label names for this metric
         # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
@@ -245,10 +412,10 @@ class CardinalityAnalyzer:
             # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
             query = f'count by ({label}) ({metric_name}{{__ignore_usage__=""}})'
             try:
-                # Use step=300 (5 minutes) to capture cardinality variation and bursts
-                # This aligns with the total cardinality query and allows detecting
-                # cardinality spikes that occur during the window
-                data = self.query_prometheus(query, start, end, step=300)
+                # Use calculated step to capture cardinality variation while avoiding chunk limits
+                # Larger time ranges automatically use larger steps to stay within Mimir limits
+                # Retry wrapper will automatically increase step if chunk limit is hit
+                data = self.query_prometheus_with_retry(query, start, end, step=step)
 
                 # Calculate max cardinality over the time window to capture bursts
                 label_cardinalities = defaultdict(list)
@@ -286,7 +453,7 @@ class CardinalityAnalyzer:
         else:
             query = f'count(count by (__name__) ({metric_name}{{__ignore_usage__=""}}))'
         try:
-            data = self.query_prometheus(query, start, end, step=300)
+            data = self.query_prometheus_with_retry(query, start, end, step=step)
             if data.get('result'):
                 values = [float(v[1]) for v in data['result'][0]['values'] if v[1] != 'NaN']
                 if values:
@@ -1037,6 +1204,17 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
 
+    # Performance tuning options
+    parser.add_argument('--step', type=int,
+                       help='Query step interval in seconds. Larger values reduce data points but lower temporal resolution. '
+                            'If not specified, automatically calculated based on time window to avoid chunk limits. '
+                            'Examples: 60 (1min), 300 (5min), 3600 (1hour). '
+                            'Use larger steps for longer time ranges to prevent "too many chunks" errors.')
+    parser.add_argument('--max-points', type=int, default=150,
+                       help='Target number of data points per series when auto-calculating step (default: 150). '
+                            'Lower values use larger steps and fetch less data, reducing chunk limit errors. '
+                            'Higher values provide better temporal resolution but may hit Mimir limits.')
+
     # Comparison options
     parser.add_argument('--compare', action='store_true',
                        help='Enable comparison mode to analyze changes between two time periods')
@@ -1118,7 +1296,11 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
         for metric in metrics_to_analyze:
             logger.info(f"Analyzing cardinality for metric: {metric}")
             try:
-                cardinality_data = analyzer.analyze_metric_cardinality(metric, start_ts, end_ts)
+                cardinality_data = analyzer.analyze_metric_cardinality(
+                    metric, start_ts, end_ts,
+                    custom_step=args.step,  # Pass user-specified step (or None for auto-calc)
+                    target_points=args.max_points  # Pass target points for auto-calculation
+                )
                 analyses.append({
                     'metric': metric,
                     'data': cardinality_data,
@@ -1172,7 +1354,11 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
             for metric in metrics_to_analyze:
                 try:
                     logger.info(f"Analyzing comparison window for metric: {metric}")
-                    comp_data = analyzer.analyze_metric_cardinality(metric, comp_start, comp_end)
+                    comp_data = analyzer.analyze_metric_cardinality(
+                        metric, comp_start, comp_end,
+                        custom_step=args.step,  # Use same step settings for consistency
+                        target_points=args.max_points
+                    )
                     
                     # Log if no data found
                     if not comp_data or all(not v for k, v in comp_data.items() if k != '__total__'):
