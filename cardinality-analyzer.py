@@ -1916,7 +1916,14 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
     # AI analysis option
     parser.add_argument('--ai-analysis', action='store_true',
                        help='Generate AI-powered analysis using OpenAI Responses API (requires OPENAI_API_KEY env var)')
-    
+
+    # HTML optimization options
+    parser.add_argument('--top-n-embed', type=int, default=20,
+                       help='Number of top label values to embed in HTML file for initial rendering (default: 20). '
+                            'Remaining data is stored in a separate JSON file and loaded on-demand. '
+                            'Higher values increase HTML file size but show more data without lazy loading. '
+                            'Set to -1 to embed all data (legacy behavior, not recommended for large datasets).')
+
     args = parser.parse_args()
     
     # Configure logging based on verbose flag
@@ -2131,6 +2138,11 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
             logger.info(f"CSV output written to: {csv_file}")
         
         if args.output in ['html', 'all']:
+            # Generate separate JSON data file if using lazy loading
+            if args.top_n_embed != -1:
+                json_file = generate_json_data_file(analyses, comparisons)
+                logger.info(f"Complete data file size: {os.path.getsize(json_file) / (1024*1024):.2f} MB")
+
             html_content = generate_html_output(
                 analyses, comparisons,
                 args.window,
@@ -2138,15 +2150,23 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
                 ai_analysis_text,
                 args.compare_window if args.compare else "",
                 actual_compare_start_time if args.compare else "",  # Show calculated compare start time
-                command_line
+                command_line,
+                args.top_n_embed  # Pass the top-n-embed parameter
             )
             html_file = "cardinality_analysis.html"
             with open(html_file, 'w') as f:
                 f.write(html_content)
-            logger.info(f"HTML report written to: {html_file}")
+
+            html_size_mb = os.path.getsize(html_file) / (1024*1024)
+            logger.info(f"HTML report written to: {html_file} ({html_size_mb:.2f} MB)")
+
             if args.output == 'html':
                 print(f"\n✅ Analysis complete! Open {html_file} in your browser to view the interactive report")
-                print(f"   File: {os.path.abspath(html_file)}")
+                print(f"   HTML File: {os.path.abspath(html_file)} ({html_size_mb:.2f} MB)")
+                if args.top_n_embed != -1:
+                    json_size_mb = os.path.getsize(json_file) / (1024*1024)
+                    print(f"   Data File: {os.path.abspath(json_file)} ({json_size_mb:.2f} MB)")
+                    print(f"   Note: Keep both files in the same directory for lazy loading to work")
         
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
