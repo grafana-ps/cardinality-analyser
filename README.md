@@ -16,6 +16,7 @@ The `cardinality-analyzer.py` script helps diagnose "what's the root cause of my
 2. **Comparing time windows** - Identifies what changed between "before" and "after" periods
 3. **Interactive reporting** - Generates HTML reports with sortable tables and charts
 4. **Multiple output formats** - CLI, CSV, or HTML outputs for different use cases
+5. **Optimized file sizes** - NEW: HTML reports now 97% smaller using lazy loading (500 KB vs 17 MB)
 
 ## Quick Start
 
@@ -54,6 +55,10 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 ```bash
 # Analyzes metrics from (now - 1 hour) to now
 ./cardinality-analyzer.py -w 1h
+
+# This creates two files:
+#   - cardinality_analysis.html (~500 KB) - Open this in your browser
+#   - cardinality_analysis_data.json (~17 MB) - Keep this alongside the HTML
 ```
 
 **Analyze specific metric:**
@@ -172,6 +177,12 @@ Performance tuning options:
                             Examples: 60 (1min), 300 (5min), 3600 (1hour)
 --max-points                Target number of data points per series for auto-calculation (default: 150).
                             Lower values use larger steps and reduce chunk errors.
+
+HTML optimization options:
+--top-n-embed               Number of top label values to embed in HTML file (default: 20).
+                            Remaining data is stored in a separate JSON file and loaded on-demand.
+                            Higher values increase HTML size but show more data initially.
+                            Set to -1 to embed all data (legacy mode, not recommended for large datasets).
 
 Comparison options:
 --compare                   Enable comparison mode to analyze changes between two time periods
@@ -335,6 +346,61 @@ For cardinality trend analysis, larger steps are usually fine since cardinality 
 - Filterable results
 - Before/after comparison views
 - Usage instructions included
+
+**⚠️ Important: Viewing HTML Reports**
+
+HTML reports must be served via HTTP (not opened directly with `file://`) for the interactive features to work properly.
+
+**Quick Start - Serve the Reports:**
+```bash
+# In the same directory as your HTML files, run:
+python3 -m http.server 8000
+
+# Then open in your browser:
+# http://localhost:8000/cardinality_analysis.html
+```
+
+**Why?** Browsers block JavaScript `fetch()` requests from local files for security (CORS policy). When you click "Show all values" buttons to load complete data, the browser needs to fetch the JSON file via HTTP.
+
+**Alternative Methods:**
+- Use any local web server (nginx, Apache, VS Code Live Server, etc.)
+- Upload files to an internal web server
+- For one-time viewing without a server, use `--top-n-embed -1` for legacy single-file mode (generates larger HTML)
+
+**To stop the Python server:** Press `Ctrl+C` or run `lsof -ti:8000 | xargs kill`
+
+**New: Optimized File Size with Lazy Loading**
+
+By default, the HTML output uses a two-file approach to dramatically reduce file sizes:
+
+- **`cardinality_analysis.html`** (~500 KB): Lightweight report with initial data
+  - Contains top-N label values (default: 20) for immediate viewing
+  - Includes all charts, tables, and interactive features
+  - Can be easily shared via email or Slack
+
+- **`cardinality_analysis_data.json`** (~17 MB typical): Complete dataset
+  - Contains all cardinality data for all label values
+  - Loaded on-demand when you click "Show all values" buttons
+  - Can be compressed for archival (e.g., `gzip cardinality_analysis_data.json`)
+
+**Important**: Keep both files in the same directory for lazy loading to work.
+
+**File Size Comparison**:
+- **Legacy mode** (single HTML file): 17+ MB
+- **New mode** (HTML + JSON): 500 KB HTML + 17 MB JSON
+- **Reduction**: 97% smaller HTML file for faster sharing and loading
+
+**Customizing the Embed Size**:
+```bash
+# Default: embed top 20 values
+./cardinality-analyzer.py -w 1h
+
+# Embed more values for faster initial display
+./cardinality-analyzer.py -w 1h --top-n-embed 50
+
+# Legacy mode: single self-contained HTML file (large)
+./cardinality-analyzer.py -w 1h --top-n-embed -1
+```
 
 ### CLI
 - Console output with formatted tables
@@ -556,7 +622,7 @@ EOF
 ```bash
 # HTML output (default) - Interactive web dashboard
 ./cardinality-analyzer.py -w 1h -o html
-# Creates: cardinality_analysis.html
+# Creates: cardinality_analysis.html (~500 KB) + cardinality_analysis_data.json (~17 MB)
 
 # CLI output - Terminal-friendly tables
 ./cardinality-analyzer.py -w 1h -o cli
@@ -564,12 +630,39 @@ EOF
 
 # CSV output - For spreadsheet analysis
 ./cardinality-analyzer.py -w 1h -o csv
-# Creates: cardinality_analysis_TIMESTAMP.csv
+# Creates: cardinality_analysis.csv
 
 # All formats at once
 ./cardinality-analyzer.py -w 1h -o all
-# Creates HTML and CSV files, plus shows CLI output
+# Creates HTML, JSON, and CSV files, plus shows CLI output
 ```
+
+### HTML File Size Optimization (`--top-n-embed`)
+**Optional**: Control how much data is embedded in the HTML file (default: 20).
+
+```bash
+# Default: embed top 20 label values (recommended)
+./cardinality-analyzer.py -w 1h --top-n-embed 20
+# HTML: ~500 KB, JSON: ~17 MB (total same as before, but HTML much smaller)
+
+# Embed more values for richer initial view
+./cardinality-analyzer.py -w 1h --top-n-embed 50
+# HTML: ~1.5 MB, JSON: ~17 MB (less lazy loading needed)
+
+# Embed only top 10 for minimal HTML size
+./cardinality-analyzer.py -w 1h --top-n-embed 10
+# HTML: ~300 KB, JSON: ~17 MB (smallest HTML possible)
+
+# Legacy mode: single self-contained file (not recommended)
+./cardinality-analyzer.py -w 1h --top-n-embed -1
+# Single HTML: 17+ MB (no separate JSON file, everything embedded)
+```
+
+**When to use different values:**
+- **Default (20)**: Best balance for most use cases - small HTML for sharing, quick initial load
+- **Higher (50-100)**: When you want more data visible without clicking "Show all values" buttons
+- **Lower (10)**: When HTML file size is critical (email attachments, slow connections)
+- **-1 (legacy)**: Only if you need a single self-contained file and don't mind large size
 
 ### Comparison Mode (`--compare`)
 **Optional**: Enable before/after comparison between two time windows.
@@ -693,6 +786,22 @@ Analyzes a specific set of metrics individually, avoiding "too many chunks" erro
   --ai-analysis -o html
 ```
 Creates a comprehensive HTML report with AI insights comparing last 24 hours with the previous 24 hours.
+
+### "Optimize HTML file size for email sharing"
+```bash
+# Minimal HTML file for easy sharing (default behavior)
+./cardinality-analyzer.py -w 1h --top-n-embed 20
+# Creates ~500 KB HTML file + separate JSON data file
+
+# Embed more data for faster viewing (larger HTML)
+./cardinality-analyzer.py -w 1h --top-n-embed 50
+# Creates ~1.5 MB HTML file + separate JSON data file
+
+# Legacy single-file mode (not recommended for large datasets)
+./cardinality-analyzer.py -w 1h --top-n-embed -1
+# Creates single 17+ MB HTML file with all data embedded
+```
+The default lazy loading approach creates smaller HTML files perfect for email attachments while preserving access to all data.
 
 ## AI-Powered Analysis (NEW)
 
