@@ -473,57 +473,198 @@ class CardinalityAnalyzer:
             'metric': metric_name,
             'window1': window1,
             'window2': window2,
-            'changes': {}
+            'changes': {},
+            'label_value_diffs': {}  # New: track which label values appeared/disappeared
         }
-        
+
         # Get all labels from both windows
         all_labels = set(window1.keys()) | set(window2.keys())
-        
+
         for label in all_labels:
             if label == '__total__':
                 continue
-                
+
             w1_data = window1.get(label, {})
             w2_data = window2.get(label, {})
-            
+
             w1_card = w1_data.get('total_cardinality', 0)
             w2_card = w2_data.get('total_cardinality', 0)
-            
+
             if w1_card > 0:
                 change_pct = ((w2_card - w1_card) / w1_card) * 100
             else:
                 change_pct = 100 if w2_card > 0 else 0
-            
+
             comparison['changes'][label] = {
                 'before': w1_card,
                 'after': w2_card,
                 'change': w2_card - w1_card,
                 'change_pct': change_pct
             }
-        
+
+            # Compute label value differences
+            w1_values = set(w1_data.get('all_values', {}).keys())
+            w2_values = set(w2_data.get('all_values', {}).keys())
+
+            new_values = w2_values - w1_values  # Appeared in window2
+            removed_values = w1_values - w2_values  # Disappeared from window2
+            common_values = w1_values & w2_values  # Existed in both
+
+            # For common values, check which ones changed significantly
+            changed_values = []
+            for val in common_values:
+                w1_count = w1_data['all_values'].get(val, [0])
+                w2_count = w2_data['all_values'].get(val, [0])
+                # Get max value from array if it's an array
+                w1_max = max(w1_count) if isinstance(w1_count, list) else w1_count
+                w2_max = max(w2_count) if isinstance(w2_count, list) else w2_count
+
+                # Consider it changed if difference > 10% and absolute change > 5
+                if w1_max > 0:
+                    change_pct_val = abs(w2_max - w1_max) / w1_max * 100
+                    if change_pct_val > 10 and abs(w2_max - w1_max) > 5:
+                        changed_values.append({
+                            'value': val,
+                            'before': w1_max,
+                            'after': w2_max,
+                            'change': w2_max - w1_max
+                        })
+
+            # Store top 20 of each category sorted by impact
+            comparison['label_value_diffs'][label] = {
+                'new': sorted(
+                    [{'value': v, 'cardinality': max(w2_data['all_values'][v]) if isinstance(w2_data['all_values'][v], list) else w2_data['all_values'][v]}
+                     for v in new_values],
+                    key=lambda x: x['cardinality'],
+                    reverse=True
+                )[:20],
+                'removed': sorted(
+                    [{'value': v, 'cardinality': max(w1_data['all_values'][v]) if isinstance(w1_data['all_values'][v], list) else w1_data['all_values'][v]}
+                     for v in removed_values],
+                    key=lambda x: x['cardinality'],
+                    reverse=True
+                )[:20],
+                'changed': sorted(changed_values, key=lambda x: abs(x['change']), reverse=True)[:20],
+                'new_count': len(new_values),
+                'removed_count': len(removed_values),
+                'changed_count': len(changed_values)
+            }
+
         # Sort by absolute change
         comparison['sorted_changes'] = sorted(
             comparison['changes'].items(),
             key=lambda x: abs(x[1]['change']),
             reverse=True
         )
-        
+
         return comparison
 
-def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]] = None, 
+def generate_json_data_file(analyses: List[Dict], comparisons: Optional[List[Dict]] = None,
+                           filename: str = "cardinality_analysis_data.json") -> str:
+    """Generate separate JSON file with complete cardinality data for lazy loading
+
+    Args:
+        analyses: List of analysis results
+        comparisons: Optional list of comparison results
+        filename: Output filename for JSON data
+
+    Returns:
+        Path to generated JSON file
+    """
+    data = {
+        'analyses': analyses,
+        'comparisons': comparisons or []
+    }
+
+    with open(filename, 'w') as f:
+        json.dump(data, f, default=str)
+
+    logger.info(f"Complete data written to: {filename}")
+    return filename
+
+def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]] = None,
                         window: str = "", start_time: str = "", ai_analysis: Optional[str] = None,
-                        compare_window: str = "", compare_start_time: str = "", 
-                        command_line: str = "") -> str:
-    """Generate interactive HTML report"""
-    
+                        compare_window: str = "", compare_start_time: str = "",
+                        command_line: str = "", top_n_embed: int = 20) -> str:
+    """Generate interactive HTML report
+
+    Args:
+        analyses: List of analysis results
+        comparisons: Optional list of comparison results
+        window: Analysis window duration
+        start_time: Analysis start time
+        ai_analysis: Optional AI analysis text
+        compare_window: Comparison window duration
+        compare_start_time: Comparison start time
+        command_line: Command line used to generate report
+        top_n_embed: Number of top label values to embed (default: 20).
+                     Set to -1 to embed all data (legacy behavior)
+
+    Returns:
+        HTML report string
+    """
+
     # Prepare data for JavaScript
-    analyses_json = json.dumps(analyses, default=str)
-    comparisons_json = json.dumps(comparisons or [], default=str)
+    # If top_n_embed is -1, embed all data (legacy behavior)
+    if top_n_embed == -1:
+        analyses_json = json.dumps(analyses, default=str)
+        comparisons_json = json.dumps(comparisons or [], default=str)
+        has_external_data = False
+    else:
+        # Create trimmed version with only top-N values for embedding
+        analyses_trimmed = []
+        for analysis in analyses:
+            trimmed_analysis = {
+                'metric': analysis['metric'],
+                'window': analysis.get('window', {}),
+                'data': {}
+            }
+
+            for label, info in analysis['data'].items():
+                if label == '__total__':
+                    # Always include total stats
+                    trimmed_analysis['data'][label] = info
+                else:
+                    # Only include top-N values, mark if more data available
+                    all_values = info.get('all_values', {})
+                    total_values_count = len(all_values)
+
+                    trimmed_info = {
+                        'total_cardinality': info.get('total_cardinality', 0),
+                        'top_values': info.get('top_values', [])[:top_n_embed],
+                        'has_more': total_values_count > top_n_embed,
+                        'total_values_count': total_values_count
+                    }
+                    trimmed_analysis['data'][label] = trimmed_info
+
+            analyses_trimmed.append(trimmed_analysis)
+
+        # Trim comparisons similarly
+        comparisons_trimmed = []
+        if comparisons:
+            for comp in comparisons:
+                trimmed_comp = {
+                    'metric': comp['metric'],
+                    'changes': comp.get('changes', {}),
+                    'sorted_changes': comp.get('sorted_changes', []),
+                    'label_value_diffs': comp.get('label_value_diffs', {})  # Include diff data
+                }
+                comparisons_trimmed.append(trimmed_comp)
+
+        analyses_json = json.dumps(analyses_trimmed, default=str)
+        comparisons_json = json.dumps(comparisons_trimmed, default=str)
+        has_external_data = True
     
     # Format values for the template
     comparison_tab = '<div class="tab" onclick="switchTab(\'comparison\')">Comparison</div>' if comparisons else ''
     start_time_str = f"(starting {start_time})" if start_time else ""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+
+    # Add lazy loading note if using external data
+    if has_external_data:
+        lazy_loading_note = '<li><strong>Lazy Loading:</strong> Click "Show all values" buttons to load complete data from the external JSON file</li>'
+    else:
+        lazy_loading_note = ''
     
     # Build analysis details
     analysis_details = []
@@ -718,6 +859,7 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                 <li>Use the filter box to search for specific metrics or labels</li>
                 <li>Charts show the top contributors to cardinality for each metric</li>
                 <li>In comparison mode, positive changes (red) indicate increased cardinality</li>
+                {lazy_loading_note}
             </ul>
         </div>
         
@@ -729,10 +871,27 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
         </div>
         
         <div id="analysis-tab" class="tab-content active">
+            <!-- Metric Visibility Controls -->
+            <div id="metric-controls" style="margin-bottom: 20px; padding: 15px; background: #f9f9f9; border-radius: 4px; border: 1px solid #e0e0e0;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <strong style="font-size: 14px;">Metric Visibility</strong>
+                    <div>
+                        <button onclick="toggleAllMetrics(true)" style="padding: 4px 8px; margin-right: 5px; background: #2196f3; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">Select All</button>
+                        <button onclick="toggleAllMetrics(false)" style="padding: 4px 8px; margin-right: 5px; background: #757575; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">Deselect All</button>
+                        <button onclick="showTopN(5)" style="padding: 4px 8px; margin-right: 5px; background: #ff9800; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">Top 5</button>
+                        <button onclick="showTopN(10)" style="padding: 4px 8px; background: #ff9800; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">Top 10</button>
+                    </div>
+                </div>
+                <div id="metric-checkbox-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; max-height: 150px; overflow-y: auto;"></div>
+            </div>
+
             <div class="filter-container">
                 <input type="text" id="filter" placeholder="Filter metrics or labels..." onkeyup="filterResults()">
+                <button onclick="exportFilteredData()" style="margin-left: 15px; padding: 8px 16px; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                    Export Filtered Data to CSV
+                </button>
             </div>
-            
+
             <div id="analysis-content"></div>
         </div>
         
@@ -744,8 +903,139 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     <script>
         const analysisData = {analyses_json};
         const comparisonData = {comparisons_json};
+        const hasExternalData = {has_external_data_js};
+        const dataFileName = 'cardinality_analysis_data.json';
         let charts = [];
-        
+        let fullDataCache = null; // Cache for loaded external data
+        let loadingData = false;
+
+        // Helper function to escape HTML special characters
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Lazy load complete data from external JSON file
+        async function loadCompleteData() {
+            if (fullDataCache) {
+                return fullDataCache;
+            }
+
+            if (loadingData) {
+                // Wait for ongoing load
+                while (loadingData) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                return fullDataCache;
+            }
+
+            if (!hasExternalData) {
+                console.warn('No external data file available');
+                return null;
+            }
+
+            loadingData = true;
+            try {
+                const response = await fetch(dataFileName);
+                if (!response.ok) {
+                    throw new Error(`Failed to load ${dataFileName}: ${response.status} ${response.statusText}`);
+                }
+                fullDataCache = await response.json();
+                console.log('Complete data loaded successfully');
+                return fullDataCache;
+            } catch (error) {
+                console.error('Error loading complete data:', error);
+                let errorMsg = `Failed to load complete data: ${error.message}.\\n\\n`;
+
+                // Check if this is likely a CORS/file:// protocol issue
+                if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+                    errorMsg += `This is likely because you're opening the HTML file directly (file:// protocol).\\n\\n`;
+                    errorMsg += `To fix this, serve the files via HTTP:\\n`;
+                    errorMsg += `1. Open terminal in the same directory\\n`;
+                    errorMsg += `2. Run: python3 -m http.server 8000\\n`;
+                    errorMsg += `3. Open: http://localhost:8000/cardinality_analysis.html\\n\\n`;
+                    errorMsg += `See README.md for more details.`;
+                } else {
+                    errorMsg += `Ensure ${dataFileName} is in the same directory as this HTML file.`;
+                }
+
+                alert(errorMsg);
+                return null;
+            } finally {
+                loadingData = false;
+            }
+        }
+
+        // Load all values for a specific metric and label
+        async function loadAllValues(event) {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+
+            // Read data from button attributes
+            const metricIdx = parseInt(btn.dataset.metricIdx, 10);
+            const labelName = btn.dataset.label;
+            const tableIdx = parseInt(btn.dataset.tableIdx, 10);
+
+            // Look up the metric name from analysisData
+            const analysis = analysisData[metricIdx];
+            if (!analysis) {
+                console.error(`Invalid metric index: ${metricIdx}`);
+                btn.textContent = 'Error';
+                btn.disabled = false;
+                return;
+            }
+            const metricName = analysis.metric;
+
+            try {
+                const data = await loadCompleteData();
+                if (!data) {
+                    btn.textContent = 'Load Failed';
+                    return;
+                }
+
+                // Find the metric in the complete data
+                const fullAnalysis = data.analyses.find(a => a.metric === metricName);
+                if (!fullAnalysis || !fullAnalysis.data[labelName]) {
+                    throw new Error(`Data not found for ${metricName}.${labelName}`);
+                }
+
+                const labelInfo = fullAnalysis.data[labelName];
+                const allValues = labelInfo.all_values || {};
+
+                // Find the row and update it with all values
+                const table = document.getElementById(`table-${tableIdx}`);
+                const rows = table.querySelectorAll('tbody tr');
+
+                for (const row of rows) {
+                    if (row.dataset.label === labelName) {
+                        // Create expanded values display
+                        const sortedValues = Object.entries(allValues)
+                            .map(([val, counts]) => [val, Array.isArray(counts) ? Math.max(...counts) : counts])
+                            .sort((a, b) => b[1] - a[1]);
+
+                        const valuesStr = sortedValues.slice(0, 50)
+                            .map(([val, count]) => `${escapeHtml(val)} (${count})`)
+                            .join(', ');
+
+                        const remaining = sortedValues.length - 50;
+                        const finalStr = remaining > 0
+                            ? `${valuesStr} ... and ${remaining} more`
+                            : valuesStr;
+
+                        row.cells[2].innerHTML = finalStr;
+                        btn.remove(); // Remove the button after loading
+                        break;
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading all values:', error);
+                btn.textContent = 'Error';
+                btn.disabled = false;
+            }
+        }
+
         function switchTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -763,21 +1053,25 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
             const container = document.getElementById('analysis-content');
             console.log('renderAnalysis called, container:', container);
             let html = '';
-            
+
             // Add note about metric count and sorting
             html += '<div style="margin-bottom: 20px; padding: 10px; background: #e3f2fd; border-radius: 4px;">';
             html += '<strong>Showing ' + analysisData.length + ' metrics</strong> sorted by highest to lowest cardinality';
             html += '</div>';
             console.log('Generated sorting note HTML');
+
+            // Populate metric visibility checkboxes
+            populateMetricCheckboxes();
             
             analysisData.forEach((analysis, idx) => {
                 const metricName = analysis.metric;
+                const metricNameEscaped = escapeHtml(metricName);
                 const data = analysis.data;
                 const totalInfo = data.__total__ || {};
-                
+
                 html += `
-                    <div class="metric-section" data-metric="${metricName}">
-                        <h2>${metricName}</h2>
+                    <div class="metric-section" data-metric="${metricNameEscaped}">
+                        <h2>${metricNameEscaped}</h2>
                         <div class="summary-cards">
                             <div class="summary-card">
                                 <h3>Max Cardinality</h3>
@@ -820,16 +1114,31 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                 
                 // Render the sorted labels
                 labelsArray.forEach(([label, info]) => {
+                    const labelEscaped = escapeHtml(label);
                     const topValues = info.top_values || [];
-                    const topValuesStr = topValues.slice(0, 5)
-                        .map(([val, count]) => `${val} (${count})`)
+                    const displayCount = Math.min(5, topValues.length);
+                    const topValuesStr = topValues.slice(0, displayCount)
+                        .map(([val, count]) => `${escapeHtml(val)} (${count})`)
                         .join(', ');
-                    
+
+                    // Add "Show all" button if there are more values available
+                    let showAllButton = '';
+                    if (info.has_more && hasExternalData) {
+                        const totalCount = info.total_values_count || info.total_cardinality || 0;
+                        showAllButton = `<br><button class="load-all-values-btn"
+                            data-metric-idx="${idx}"
+                            data-label="${labelEscaped}"
+                            data-table-idx="${idx}"
+                            style="margin-top: 8px; padding: 4px 12px; background: #2196f3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                            Show all ${totalCount} values
+                        </button>`;
+                    }
+
                     html += `
-                        <tr data-label="${label}">
-                            <td>${label}</td>
+                        <tr data-label="${labelEscaped}">
+                            <td>${labelEscaped}</td>
                             <td>${info.total_cardinality || 0}</td>
-                            <td>${topValuesStr}</td>
+                            <td>${topValuesStr}${showAllButton}</td>
                         </tr>
                     `;
                 });
@@ -923,10 +1232,22 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
             html += '<strong>Showing ' + comparisonData.length + ' metrics</strong> sorted by highest to lowest cardinality';
             html += '</div>';
             
-            comparisonData.forEach(comp => {
+            comparisonData.forEach((comp, idx) => {
+                const compMetricEscaped = escapeHtml(comp.metric);
+
                 html += `
                     <div class="metric-section">
-                        <h3>${comp.metric}</h3>
+                        <h3>${compMetricEscaped}</h3>
+
+                        <!-- Comparison Chart -->
+                        <div class="chart-container">
+                            <canvas id="comparison-chart-${idx}"></canvas>
+                        </div>
+
+                        <!-- Label Value Diff View -->
+                        <div id="diff-view-${idx}" style="margin-top: 30px;"></div>
+
+                        <h4 style="margin-top: 30px;">Detailed Changes by Label</h4>
                         <table>
                             <thead>
                                 <tr>
@@ -939,21 +1260,22 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                             </thead>
                             <tbody>
                 `;
-                
+
                 // Sort changes by 'after' cardinality (highest to lowest)
                 const changesArray = [...comp.sorted_changes].sort((a, b) => {
                     const afterA = a[1].after || 0;
                     const afterB = b[1].after || 0;
                     return afterB - afterA;
                 });
-                
+
                 changesArray.forEach(([label, change]) => {
-                    const changeClass = change.change > 0 ? 'positive-change' : 
+                    const labelEscaped = escapeHtml(label);
+                    const changeClass = change.change > 0 ? 'positive-change' :
                                       change.change < 0 ? 'negative-change' : '';
-                    
+
                     html += `
                         <tr>
-                            <td>${label}</td>
+                            <td>${labelEscaped}</td>
                             <td>${change.before}</td>
                             <td>${change.after}</td>
                             <td class="${changeClass}">${change.change > 0 ? '+' : ''}${change.change}</td>
@@ -968,10 +1290,208 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                     </div>
                 `;
             });
-            
+
             container.innerHTML = html;
+
+            // Render comparison charts and diff views after HTML is in place
+            renderComparisonCharts();
+            renderDiffViews();
         }
-        
+
+        function renderComparisonCharts() {
+            if (!comparisonData || comparisonData.length === 0) {
+                return;
+            }
+
+            comparisonData.forEach((comp, idx) => {
+                const ctx = document.getElementById(`comparison-chart-${idx}`);
+                if (!ctx) return;
+
+                // Prepare data for before/after comparison
+                const labels = [];
+                const beforeData = [];
+                const afterData = [];
+
+                // Sort by 'after' cardinality and take top 10 labels
+                const sortedChanges = [...(comp.sorted_changes || [])].sort((a, b) => {
+                    const afterA = a[1].after || 0;
+                    const afterB = b[1].after || 0;
+                    return afterB - afterA;
+                }).slice(0, 10);
+
+                sortedChanges.forEach(([label, change]) => {
+                    labels.push(label);
+                    beforeData.push(change.before || 0);
+                    afterData.push(change.after || 0);
+                });
+
+                // Create grouped bar chart showing before vs after
+                const chart = new Chart(ctx.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: 'Before',
+                                data: beforeData,
+                                backgroundColor: 'rgba(96, 125, 139, 0.6)',
+                                borderColor: 'rgba(96, 125, 139, 1)',
+                                borderWidth: 1
+                            },
+                            {
+                                label: 'After',
+                                data: afterData,
+                                backgroundColor: 'rgba(244, 67, 54, 0.6)',
+                                borderColor: 'rgba(244, 67, 54, 1)',
+                                borderWidth: 1
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: `Comparison: Before vs After - ${comp.metric}`,
+                                font: {
+                                    size: 16
+                                }
+                            },
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    afterLabel: function(context) {
+                                        const labelIdx = context.dataIndex;
+                                                        const before = beforeData[labelIdx];
+                                        const after = afterData[labelIdx];
+                                        const change = after - before;
+                                        const changePct = before > 0 ? ((change / before) * 100).toFixed(1) : '∞';
+                                        return `Change: ${change > 0 ? '+' : ''}${change} (${change > 0 ? '+' : ''}${changePct}%)`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Cardinality'
+                                }
+                            },
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Labels'
+                                }
+                            }
+                        }
+                    }
+                });
+
+                charts.push(chart);
+            });
+        }
+
+        function renderDiffViews() {
+            if (!comparisonData || comparisonData.length === 0) {
+                return;
+            }
+
+            comparisonData.forEach((comp, idx) => {
+                const container = document.getElementById(`diff-view-${idx}`);
+                if (!container) return;
+
+                const diffs = comp.label_value_diffs || {};
+                let html = '<h4>Label Value Changes</h4>';
+                html += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 15px;">';
+
+                // For each label, show new/removed/changed values
+                Object.entries(diffs).forEach(([label, diff]) => {
+                    const hasChanges = (diff.new_count || 0) > 0 || (diff.removed_count || 0) > 0 || (diff.changed_count || 0) > 0;
+
+                    if (!hasChanges) return;  // Skip labels with no changes
+
+                    const labelEscaped = escapeHtml(label);
+                    html += `<div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; background: #fafafa;">`;
+                    html += `<h5 style="margin-top: 0; margin-bottom: 10px; color: #333;">${labelEscaped}</h5>`;
+
+                    // New values (green)
+                    if (diff.new_count > 0) {
+                        html += `<div style="margin-bottom: 10px;">`;
+                        html += `<strong style="color: #388e3c;">+ ${diff.new_count} New Value${diff.new_count !== 1 ? 's' : ''}</strong>`;
+                        if (diff.new && diff.new.length > 0) {
+                            html += `<ul style="margin: 5px 0; padding-left: 20px; font-size: 12px; max-height: 150px; overflow-y: auto;">`;
+                            diff.new.slice(0, 5).forEach(item => {
+                                html += `<li style="color: #2e7d32;">${escapeHtml(item.value)} (${item.cardinality})</li>`;
+                            });
+                            if (diff.new.length > 5) {
+                                html += `<li style="color: #666; font-style: italic;">... and ${diff.new.length - 5} more</li>`;
+                            }
+                            html += `</ul>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    // Removed values (red)
+                    if (diff.removed_count > 0) {
+                        html += `<div style="margin-bottom: 10px;">`;
+                        html += `<strong style="color: #d32f2f;">- ${diff.removed_count} Removed Value${diff.removed_count !== 1 ? 's' : ''}</strong>`;
+                        if (diff.removed && diff.removed.length > 0) {
+                            html += `<ul style="margin: 5px 0; padding-left: 20px; font-size: 12px; max-height: 150px; overflow-y: auto;">`;
+                            diff.removed.slice(0, 5).forEach(item => {
+                                html += `<li style="color: #c62828;">${escapeHtml(item.value)} (${item.cardinality})</li>`;
+                            });
+                            if (diff.removed.length > 5) {
+                                html += `<li style="color: #666; font-style: italic;">... and ${diff.removed.length - 5} more</li>`;
+                            }
+                            html += `</ul>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    // Changed values (yellow/orange)
+                    if (diff.changed_count > 0) {
+                        html += `<div style="margin-bottom: 10px;">`;
+                        html += `<strong style="color: #f57c00;">~ ${diff.changed_count} Changed Value${diff.changed_count !== 1 ? 's' : ''}</strong>`;
+                        if (diff.changed && diff.changed.length > 0) {
+                            html += `<ul style="margin: 5px 0; padding-left: 20px; font-size: 12px; max-height: 150px; overflow-y: auto;">`;
+                            diff.changed.slice(0, 5).forEach(item => {
+                                const changeText = item.change > 0 ? `+${item.change}` : `${item.change}`;
+                                html += `<li style="color: #e65100;">${escapeHtml(item.value)}: ${item.before} → ${item.after} (${changeText})</li>`;
+                            });
+                            if (diff.changed.length > 5) {
+                                html += `<li style="color: #666; font-style: italic;">... and ${diff.changed.length - 5} more</li>`;
+                            }
+                            html += `</ul>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    html += `</div>`;
+                });
+
+                html += '</div>';
+
+                // Add message if no changes detected
+                const totalChanges = Object.values(diffs).reduce((sum, diff) =>
+                    sum + (diff.new_count || 0) + (diff.removed_count || 0) + (diff.changed_count || 0), 0);
+
+                if (totalChanges === 0) {
+                    html = '<div style="padding: 15px; background: #e8f5e9; border-radius: 4px; color: #2e7d32; margin-top: 15px;">';
+                    html += '<strong>✓ No significant label value changes detected</strong><br>';
+                    html += '<span style="font-size: 14px;">All labels have the same values in both windows.</span>';
+                    html += '</div>';
+                }
+
+                container.innerHTML = html;
+            });
+        }
+
         function sortTable(tableIdx, columnIdx) {
             const table = document.getElementById(`table-${tableIdx}`);
             const tbody = table.querySelector('tbody');
@@ -1009,19 +1529,19 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
         
         function filterResults() {
             const filterValue = document.getElementById('filter').value.toLowerCase();
-            
+
             // Filter metric sections
             document.querySelectorAll('.metric-section').forEach(section => {
                 const metricName = section.dataset.metric;
                 const showSection = !filterValue || metricName.toLowerCase().includes(filterValue);
-                
+
                 if (showSection) {
                     section.style.display = 'block';
-                    
+
                     // Filter rows within the section
                     section.querySelectorAll('tbody tr').forEach(row => {
                         const label = row.dataset.label;
-                        const showRow = !filterValue || 
+                        const showRow = !filterValue ||
                                       metricName.toLowerCase().includes(filterValue) ||
                                       (label && label.toLowerCase().includes(filterValue));
                         row.style.display = showRow ? '' : 'none';
@@ -1031,9 +1551,172 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                 }
             });
         }
-        
+
+        function exportFilteredData() {
+            const csvRows = [];
+            csvRows.push(['Metric', 'Label', 'Total Cardinality', 'Top Values'].join(','));
+
+            // Get all visible metric sections
+            document.querySelectorAll('.metric-section').forEach(section => {
+                if (section.style.display === 'none') return;  // Skip hidden sections
+
+                const metricName = section.dataset.metric;
+                if (!metricName) return;  // Skip sections without metric name
+
+                // Get all visible rows in this section
+                section.querySelectorAll('tbody tr').forEach(row => {
+                    if (row.style.display === 'none') return;  // Skip hidden rows
+
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length < 3) return;
+
+                    const label = cells[0].textContent.trim();
+                    const cardinality = cells[1].textContent.trim();
+                    const topValues = cells[2].textContent.trim()
+                        .replace(/Show all \\d+ values/g, '')  // Remove "Show all" button text
+                        .trim();
+
+                    // Escape values for CSV (handle commas and quotes)
+                    const escapeCsv = (str) => {
+                        if (str.includes(',') || str.includes('"') || str.includes('\\n')) {
+                            return `"${str.replace(/"/g, '""')}"`;
+                        }
+                        return str;
+                    };
+
+                    csvRows.push([
+                        escapeCsv(metricName),
+                        escapeCsv(label),
+                        cardinality,
+                        escapeCsv(topValues)
+                    ].join(','));
+                });
+            });
+
+            // Create CSV content
+            const csvContent = csvRows.join('\\n');
+
+            // Create download link
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+
+            // Generate filename with timestamp
+            const now = new Date();
+            const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const filename = `cardinality_filtered_${timestamp}.csv`;
+
+            link.setAttribute('href', url);
+            link.setAttribute('download', filename);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            console.log(`Exported ${csvRows.length - 1} rows to ${filename}`);
+        }
+
+        function populateMetricCheckboxes() {
+            const checkboxContainer = document.getElementById('metric-checkbox-list');
+            if (!checkboxContainer) return;
+
+            let html = '';
+            analysisData.forEach((analysis, idx) => {
+                const metricName = analysis.metric;
+                const metricNameEscaped = escapeHtml(metricName);
+                const isChecked = localStorage.getItem(`metric_visible_${metricName}`) !== 'false';
+
+                html += `
+                    <label style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+                        <input type="checkbox"
+                               id="metric-checkbox-${idx}"
+                               data-metric-idx="${idx}"
+                               ${isChecked ? 'checked' : ''}
+                               onchange="toggleMetricVisibilityByIndex(${idx})"
+                               style="margin-right: 6px; cursor: pointer;">
+                        <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${metricNameEscaped}">
+                            ${metricNameEscaped}
+                        </span>
+                    </label>
+                `;
+            });
+
+            checkboxContainer.innerHTML = html;
+
+            // Apply initial visibility from localStorage
+            analysisData.forEach((analysis, idx) => {
+                const metricName = analysis.metric;
+                const isVisible = localStorage.getItem(`metric_visible_${metricName}`) !== 'false';
+                if (!isVisible) {
+                    toggleMetricVisibilityByIndex(idx, false, false);  // Don't save again
+                }
+            });
+        }
+
+        function toggleMetricVisibilityByIndex(idx, forceState = null, saveToStorage = true) {
+            const analysis = analysisData[idx];
+            if (!analysis) return;
+
+            const metricName = analysis.metric;
+            toggleMetricVisibility(metricName, forceState, saveToStorage);
+        }
+
+        function toggleMetricVisibility(metricName, forceState = null, saveToStorage = true) {
+            const sections = document.querySelectorAll('.metric-section');
+            const checkbox = document.querySelector(`input[data-metric-idx]`);
+
+            // Find sections matching this metric
+            const matchingSections = Array.from(sections).filter(section =>
+                section.dataset.metric === metricName
+            );
+
+            // Find checkbox by looking through all checkboxes
+            let matchingCheckbox = null;
+            analysisData.forEach((analysis, idx) => {
+                if (analysis.metric === metricName) {
+                    matchingCheckbox = document.getElementById(`metric-checkbox-${idx}`);
+                }
+            });
+
+            const newState = forceState !== null ? forceState : (matchingCheckbox ? matchingCheckbox.checked : true);
+
+            matchingSections.forEach(section => {
+                section.style.display = newState ? 'block' : 'none';
+            });
+
+            if (matchingCheckbox && forceState !== null) {
+                matchingCheckbox.checked = newState;
+            }
+
+            // Save to localStorage
+            if (saveToStorage) {
+                localStorage.setItem(`metric_visible_${metricName}`, newState.toString());
+            }
+        }
+
+        function toggleAllMetrics(show) {
+            analysisData.forEach(analysis => {
+                toggleMetricVisibility(analysis.metric, show, true);
+            });
+        }
+
+        function showTopN(n) {
+            analysisData.forEach((analysis, idx) => {
+                const shouldShow = idx < n;
+                toggleMetricVisibility(analysis.metric, shouldShow, true);
+            });
+        }
+
         // Initialize
         console.log('Initializing with', analysisData.length, 'analyses and', comparisonData.length, 'comparisons');
+
+        // Set up event delegation for "Show all values" buttons
+        document.addEventListener('click', function(event) {
+            if (event.target && event.target.classList.contains('load-all-values-btn')) {
+                loadAllValues(event);
+            }
+        });
+
         renderAnalysis();
         renderComparison();
     </script>
@@ -1049,7 +1732,9 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     html_output = html_output.replace('{ai_section}', ai_section)
     html_output = html_output.replace('{analysis_window_display}', analysis_window_display)
     html_output = html_output.replace('{compare_window_display}', compare_window_display)
-    
+    html_output = html_output.replace('{has_external_data_js}', 'true' if has_external_data else 'false')
+    html_output = html_output.replace('{lazy_loading_note}', lazy_loading_note)
+
     return html_output
 
 def generate_csv_output(analyses: List[Dict], comparisons: Optional[List[Dict]] = None, 
