@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+
+def is_regex_pattern(pattern: str) -> bool:
+    """Check if pattern contains regex special characters.
+
+    Used to auto-detect if -m argument is a regex pattern vs exact metric name.
+    """
+    regex_chars = '.*+?^${}[]|()\\'
+    return any(c in pattern for c in regex_chars)
+
+
 class CardinalityAnalyzer:
     """Main class for analyzing metric cardinality in Mimir"""
     
@@ -355,9 +365,41 @@ class CardinalityAnalyzer:
         
         # Sort by cardinality (highest to lowest) to ensure proper ordering
         metrics.sort(key=lambda x: x[1], reverse=True)
-        
+
         return metrics
-    
+
+    def get_metrics_by_pattern(self, start: int, end: int, pattern: str) -> List[Tuple[str, float]]:
+        """Get all metrics matching a regex pattern with their cardinality values.
+
+        Uses PromQL's native regex support for efficient server-side filtering.
+
+        Args:
+            start: Start timestamp
+            end: End timestamp
+            pattern: Regex pattern to match metric names (PromQL regex syntax)
+
+        Returns:
+            List of tuples: [(metric_name, cardinality_value), ...] sorted by cardinality descending
+        """
+        # Include __ignore_usage__ to prevent interference with Grafana Cloud Adaptive Telemetry
+        query = f'count by (__name__)({{__name__=~"{pattern}", __ignore_usage__=""}})'
+
+        logger.info(f"Fetching metrics matching pattern: {pattern}")
+        data = self.query_prometheus_with_retry(query, start, end, step=end-start)
+
+        metrics = []
+        for result in data.get('result', []):
+            metric_name = result['metric'].get('__name__', '')
+            if metric_name and result.get('values'):
+                # Get the cardinality value from the last data point
+                cardinality = float(result['values'][-1][1])
+                metrics.append((metric_name, cardinality))
+
+        # Sort by cardinality (highest to lowest)
+        metrics.sort(key=lambda x: x[1], reverse=True)
+
+        return metrics
+
     def analyze_metric_cardinality(self, metric_name: str, start: int, end: int,
                                    custom_step: Optional[int] = None, target_points: int = 150) -> Dict[str, Dict[str, Any]]:
         """Analyze cardinality for a specific metric by label
@@ -1880,7 +1922,7 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
                             'If not provided, uses current UTC time minus window duration. '
                             'This sets the beginning of the analysis window.')
     parser.add_argument('-m', '--metric',
-                       help='Specific metric to analyze. If not provided, analyzes top metrics')
+                       help='Specific metric name or regex pattern to analyze (e.g., "foo_.*" for metrics starting with foo_). If not provided, analyzes top metrics')
     parser.add_argument('-mf', '--metrics-file',
                        help='Path to file containing metric names (one per line). Supports # comments and blank lines. Can be combined with -m option')
     parser.add_argument('--top-n', type=int, default=20,
@@ -1972,10 +2014,21 @@ IMPORTANT: All timestamps must be in UTC timezone. Use 'Z' suffix or '+00:00' to
         # Determine which metrics to analyze
         metrics_to_analyze = []
 
-        # Add single metric if provided
+        # Add single metric or regex pattern if provided
         if args.metric:
-            metrics_to_analyze.append(args.metric)
-            logger.info(f"Single metric specified: {args.metric}")
+            if is_regex_pattern(args.metric):
+                logger.info(f"Regex pattern detected: {args.metric}")
+                matched_metrics = analyzer.get_metrics_by_pattern(start_ts, end_ts, args.metric)
+                if not matched_metrics:
+                    logger.error(f"No metrics found matching pattern: {args.metric}")
+                    sys.exit(1)
+                logger.info(f"Found {len(matched_metrics)} metrics matching pattern:")
+                for metric, cardinality in matched_metrics:
+                    logger.info(f"  {metric}: {cardinality:.0f}")
+                metrics_to_analyze = [m for m, _ in matched_metrics]
+            else:
+                metrics_to_analyze.append(args.metric)
+                logger.info(f"Single metric specified: {args.metric}")
 
         # Add metrics from file if provided
         if args.metrics_file:

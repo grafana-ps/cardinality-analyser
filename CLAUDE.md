@@ -25,6 +25,11 @@ python3 -m pip install -r requirements.txt
 # Analyze specific metric
 ./cardinality-analyzer.py -w 1h -m my_application_requests_total
 
+# Analyze metrics matching a regex pattern
+./cardinality-analyzer.py -w 1h -m "foo_.*"              # All metrics starting with foo_
+./cardinality-analyzer.py -w 1h -m ".*request.*"         # Metrics containing "request"
+./cardinality-analyzer.py -w 1h -m "http_requests_.*"    # HTTP request metrics
+
 # Analyze multiple metrics from a file
 ./cardinality-analyzer.py -w 1h -mf metrics.txt
 

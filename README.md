@@ -67,6 +67,18 @@ PROMETHEUS_API_KEY="glc_key-example-..."
 ./cardinality-analyzer.py -w 1h -m my_application_requests_total
 ```
 
+**Analyze metrics matching a regex pattern:**
+```bash
+# Analyze all metrics starting with "foo_"
+./cardinality-analyzer.py -w 1h -m "foo_.*"
+
+# Analyze metrics containing "request" in the name
+./cardinality-analyzer.py -w 1h -m ".*request.*"
+
+# Analyze all HTTP request metrics
+./cardinality-analyzer.py -w 1h -m "http_requests_.*"
+```
+
 **Analyze multiple metrics from a file:**
 ```bash
 # Analyze metrics listed in a file (one per line)
@@ -164,7 +176,8 @@ Optional:
 -s, --start-time, --from    Start time in ISO format (e.g., 2024-01-15T10:00:00Z for UTC).
                             Default: current UTC time - window duration
                             This sets the beginning of the analysis window.
--m, --metric                Specific metric to analyze. If not provided, analyzes top N metrics
+-m, --metric                Specific metric name or regex pattern to analyze (e.g., "foo_.*").
+                            If not provided, analyzes top N metrics. Regex patterns are auto-detected.
 -mf, --metrics-file         Path to file containing metric names (one per line).
                             Supports # comments and blank lines. Can be combined with -m option
 --top-n                     Number of top metrics to analyze when no specific metric is provided (default: 20)
@@ -567,11 +580,21 @@ EOF
 ```
 
 ### Metric Selection (`-m`, `--metric`)
-**Optional**: Focus on a specific metric instead of top N metrics.
+**Optional**: Focus on a specific metric or metrics matching a regex pattern.
+
+The `-m` flag supports both exact metric names and regex patterns. Regex patterns are auto-detected when the value contains special characters like `.*`, `+`, `?`, `^`, `$`, `[]`, `{}`, `|`, or `()`.
 
 ```bash
-# Analyze specific metric
+# Analyze specific metric (exact name)
 ./cardinality-analyzer.py -w 1h -m kubernetes_pod_info
+
+# Analyze metrics matching a regex pattern
+./cardinality-analyzer.py -w 1h -m "foo_.*"           # All metrics starting with "foo_"
+./cardinality-analyzer.py -w 1h -m ".*request.*"      # Metrics containing "request"
+./cardinality-analyzer.py -w 1h -m "http_requests_.*" # HTTP request metrics
+
+# Regex pattern with comparison
+./cardinality-analyzer.py -w 1h -m "api_.*" --compare --compare-window 1h
 
 # Analyze specific metric with comparison
 ./cardinality-analyzer.py -w 1h -m http_requests_total --compare --compare-window 1h
@@ -579,6 +602,12 @@ EOF
 # With AI analysis for deep insights
 ./cardinality-analyzer.py -w 1h -m problematic_metric --ai-analysis
 ```
+
+**Regex pattern notes:**
+- Uses PromQL regex syntax (same as Prometheus/Mimir)
+- Filtering happens server-side for efficiency
+- Returns ALL matching metrics (no top-N limit applied)
+- Results are sorted by cardinality (highest first)
 
 ### Metrics File (`-mf`, `--metrics-file`)
 **Optional**: Analyze multiple metrics from a file (one metric name per line).
